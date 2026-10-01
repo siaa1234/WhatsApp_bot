@@ -3,7 +3,7 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const P = require("pino")
 
 // 👉 SESSION ID EKA ME THANATA
-const SESSION_ID = "JI1GRR5A#UVLx-m27IRK15_lsy1GD6e5mwGtOHLSF9ehvFnuvlwE"
+const SESSION_ID = "𝙰𝚂𝙸𝚃𝙷𝙰-𝙼𝙳=ada0b2967d5f910a"
 
 async function start() {
   if (!fs.existsSync('./auth')) fs.mkdirSync('./auth')
