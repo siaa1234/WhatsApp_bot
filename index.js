@@ -1,35 +1,45 @@
+const fs = require("fs")
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys")
 const P = require("pino")
 
+// 👉 SESSION ID EKA ME THANATA
+const SESSION_ID = "ASITHA-MD=7694a6b0f36083ef"
+
 async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth')
-  const sock = makeWASocket({ auth: state, logger: P({ level: "silent" }) })
+  if (!fs.existsSync('./auth')) fs.mkdirSync('./auth')
 
-  
-  const MY_NUMBER = "94762320234"
-
-  if (!sock.authState.creds.registered) {
-    let code = await sock.requestPairingCode(MY_NUMBER)
-    console.log("PAIR CODE: " + code)
+  // Session ID eka creds.json karanawa
+  if (SESSION_ID.includes("~") &&!fs.existsSync('./auth/creds.json')) {
+    let b64 = SESSION_ID.split("~")[1]
+    fs.writeFileSync('./auth/creds.json', Buffer.from(b64, 'base64'))
   }
+
+  const { state, saveCreds } = await useMultiFileAuthState('./auth')
+  const sock = makeWASocket({
+    auth: state,
+    logger: P({ level: "silent" }),
+    browser: ["Chrome", "Chrome", "110.0"]
+  })
 
   sock.ev.on("creds.update", saveCreds)
 
-  // Message එකක් ආවම
+  sock.ev.on("connection.update", (u) => {
+    const { connection, lastDisconnect } = u
+    if (connection === "open") console.log("✅ CONNECTED")
+    if (connection === "close" && lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) start()
+  })
+
+  // 👉 AUTO REPLY MESSAGE
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0]
     if (!msg.message || msg.key.fromMe) return
-    const from = msg.key.remoteJid
-    await sock.sendMessage(from, { text: "Have a nice day! 💖\nMama dan busy, passe reply karannam." })
+    await sock.sendMessage(msg.key.remoteJid, { text: "Have a nice day! 💖 Mama dan busy." })
   })
 
-  // Call එකක් ආවම auto reject
-  sock.ev.on("call", async (calls) => {
-    for (let c of calls) {
-      if (c.status === "offer") {
-        await sock.rejectCall(c.id, c.from)
-        await sock.sendMessage(c.from, { text: "Calls are blocked. Please send a message." })
-      }
+  // 👉 AUTO CALL BLOCK
+  sock.ev.on("call", async (c) => {
+    for (let call of c) {
+      if (call.status === "offer") await sock.rejectCall(call.id, call.from)
     }
   })
 }
