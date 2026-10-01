@@ -1,0 +1,26 @@
+name: ASITHA-BOT-24H
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["ASITHA-BOT-24H"]
+    types: [completed]
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20
+      - run: npm install
+      - run: node index.js
+
+      - name: Loop
+        if: always()
+        run: |
+          sleep 10
+          gh workflow run ASITHA-BOT-24H.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
