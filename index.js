@@ -1,37 +1,104 @@
-const { Telegraf } = require("telegraf")
+const { Telegraf } = require('telegraf');
 
-const bot = new Telegraf(process.env.BOT_TOKEN)
-const OMDB_API = process.env.OMDB_API || "c011220a"
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const OMDB_API = process.env.OMDB_API || 'c011220a';
+// ඔයාගේ API එක
+const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 
-bot.start((ctx) => ctx.reply("🎬 Hansaka MD Movie Bot Online!\n\nFilm එකේ නම එවන්න, මම විස්තර දෙන්නම්!"))
+if (!BOT_TOKEN) {
+  console.error('BOT_TOKEN not set!');
+  process.exit(1);
+}
 
-bot.on("text", async (ctx) => {
-  const movieName = ctx.message.text
-  if (movieName.startsWith("/")) return
+const bot = new Telegraf(BOT_TOKEN);
+
+// ඔයාගේ API එකෙන් film එක හොයන function එක
+async function searchMyAPI(movieName) {
+  try {
+    const res = await fetch(MY_API_URL);
+    const data = await res.json();
+    // data එක array එකක් නම්, නැත්තම් data.movies වගේ field එකක් නම් check කරනවා
+    const movies = Array.isArray(data) ? data : data.movies || data.data || [];
+
+    // නමට සමාන එකක් හොයනවා (case-insensitive)
+    const found = movies.find(m => 
+      (m.title || m.name || '').toLowerCase().includes(movieName.toLowerCase())
+    );
+    return found;
+  } catch (e) {
+    console.log('My API Error:', e.message);
+    return null;
+  }
+}
+
+bot.start((ctx) => ctx.reply('🎬 හන්සක MD Bot එකට ආයුබෝවන්!\n\nFilm එකක නමක් එවන්න, මම Poster එක + Download Link එක දෙන්නම්!\nඋදා: Avatar'));
+
+bot.on('text', async (ctx) => {
+  const query = ctx.message.text.trim();
+  if (query.startsWith('/')) return;
+
+  await ctx.reply(`🔍 "${query}" හොයනවා...`);
 
   try {
-    await ctx.sendChatAction('typing')
-    const url = `http://www.omdbapi.com/?t=${encodeURIComponent(movieName)}&apikey=${OMDB_API}`
-    const res = await fetch(url)
-    const data = await res.json()
+    // 1. OMDB එකෙන් Details ගන්නවා
+    const omdbUrl = `https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`;
+    const omdbRes = await fetch(omdbUrl);
+    const omdbData = await omdbRes.json();
 
-    if (data.Response === "False") {
-      return ctx.reply(`❌ "${movieName}" හම්බුනේ නෑ. වෙන නමක් try කරන්න.`)
+    // 2. ඔයාගේ API එකෙන් Movie එක හොයනවා
+    const myMovie = await searchMyAPI(query);
+
+    if (omdbData.Response === 'False' && !myMovie) {
+      return ctx.reply('😕 Film එක හම්බුනේ නෑ. වෙන නමකින් try කරන්න.');
     }
 
-    const caption = `🎬 *${data.Title}* (${data.Year})\n\n⭐ *IMDb:* ${data.imdbRating}/10\n🎭 *Genre:* ${data.Genre}\n⏱️ *Runtime:* ${data.Runtime}\n📅 *Released:* ${data.Released}\n\n📝 *Plot:*\n${data.Plot}\n\n👥 *Actors:* ${data.Actors}`
+    // OMDB එක නැත්තම් ඔයාගේ API එකේ data විතරක් පාවිච්චි කරනවා
+    const title = omdbData.Title || myMovie?.title || query;
+    const year = omdbData.Year || myMovie?.year || '';
+    const poster = omdbData.Poster !== 'N/A' ? omdbData.Poster : myMovie?.poster || null;
+    
+    let caption = `🎬 *${title}* ${year ? `(${year})` : ''}\n\n`;
+    if (omdbData.Plot && omdbData.Plot !== 'N/A') caption += `📝 ${omdbData.Plot}\n\n`;
+    if (omdbData.imdbRating && omdbData.imdbRating !== 'N/A') caption += `⭐ IMDb: ${omdbData.imdbRating}\n`;
+    if (omdbData.Runtime && omdbData.Runtime !== 'N/A') caption += `⏱️ ${omdbData.Runtime}\n`;
+    
+    // ඔයාගේ API එකේ තියෙන download link එක
+    let downloadLink = myMovie?.downloadUrl || myMovie?.link || myMovie?.url || myMovie?.streamUrl || null;
+    
+    // Inline Buttons හදනවා
+    const buttons = [];
+    if (downloadLink) {
+      buttons.push([{ text: '📥 Full Movie Download / Watch', url: downloadLink }]);
+    }
+    if (myMovie?.telegramLink) {
+      buttons.push([{ text: '📲 Telegram File', url: myMovie.telegramLink }]);
+    }
+    // ඔයාගේ site එකේ link එක default දානවා
+    buttons.push([{ text: '🌐 Visit Hansaka.lk', url: 'https://hansaka.lk' }]);
 
-    if (data.Poster && data.Poster !== "N/A") {
-      await ctx.replyWithPhoto(data.Poster, { caption: caption, parse_mode: 'Markdown' })
+    if (poster) {
+      await ctx.replyWithPhoto(poster, {
+        caption: caption,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: buttons }
+      });
     } else {
-      await ctx.reply(caption, { parse_mode: 'Markdown' })
+      await ctx.reply(caption, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: buttons }
+      });
     }
 
-  } catch (e) {
-    console.log(e)
-    ctx.reply("Error එකක් ආවා බං, පස්සේ try කරන්න.")
-  }
-})
+    if (!downloadLink) {
+        await ctx.reply('ℹ️ Full Movie එක මගේ API එකේ තාම නෑ. ඒත් Details ටික උඩ තියෙනවා. ඔයාගේ JSON එකට Add කරන්න.');
+    }
 
-bot.launch()
-console.log("Movie Bot Started!")
+  } catch (err) {
+    console.error(err);
+    ctx.reply('⚠️ Error එකක් ආවා: ' + err.message);
+  }
+});
+
+bot.launch().then(() => console.log('Bot Started - Srggbhv_bot Online ✅'));
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
