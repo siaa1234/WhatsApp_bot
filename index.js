@@ -1,46 +1,37 @@
-const fs = require("fs")
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys")
-const P = require("pino")
+const { Telegraf } = require("telegraf")
 
-// 👉 SESSION ID EKA ME THANATA
-const SESSION_ID = "𝙰𝚂𝙸𝚃𝙷𝙰-𝙼𝙳=ada0b2967d5f910a"
+const bot = new Telegraf(process.env.BOT_TOKEN)
+const OMDB_API = process.env.OMDB_API || "c011220a"
 
-async function start() {
-  if (!fs.existsSync('./auth')) fs.mkdirSync('./auth')
+bot.start((ctx) => ctx.reply("🎬 Hansaka MD Movie Bot Online!\n\nFilm එකේ නම එවන්න, මම විස්තර දෙන්නම්!"))
 
-  // Session ID eka creds.json karanawa
-  if (SESSION_ID.includes("~") &&!fs.existsSync('./auth/creds.json')) {
-    let b64 = SESSION_ID.split("~")[1]
-    fs.writeFileSync('./auth/creds.json', Buffer.from(b64, 'base64'))
-  }
+bot.on("text", async (ctx) => {
+  const movieName = ctx.message.text
+  if (movieName.startsWith("/")) return
 
-  const { state, saveCreds } = await useMultiFileAuthState('./auth')
-  const sock = makeWASocket({
-    auth: state,
-    logger: P({ level: "silent" }),
-    browser: ["Chrome", "Chrome", "110.0"]
-  })
+  try {
+    await ctx.sendChatAction('typing')
+    const url = `http://www.omdbapi.com/?t=${encodeURIComponent(movieName)}&apikey=${OMDB_API}`
+    const res = await fetch(url)
+    const data = await res.json()
 
-  sock.ev.on("creds.update", saveCreds)
-
-  sock.ev.on("connection.update", (u) => {
-    const { connection, lastDisconnect } = u
-    if (connection === "open") console.log("✅ CONNECTED")
-    if (connection === "close" && lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) start()
-  })
-
-  // 👉 AUTO REPLY MESSAGE
-  sock.ev.on("messages.upsert", async (m) => {
-    const msg = m.messages[0]
-    if (!msg.message || msg.key.fromMe) return
-    await sock.sendMessage(msg.key.remoteJid, { text: "Have a nice day! 💖 Mama dan busy." })
-  })
-
-  // 👉 AUTO CALL BLOCK
-  sock.ev.on("call", async (c) => {
-    for (let call of c) {
-      if (call.status === "offer") await sock.rejectCall(call.id, call.from)
+    if (data.Response === "False") {
+      return ctx.reply(`❌ "${movieName}" හම්බුනේ නෑ. වෙන නමක් try කරන්න.`)
     }
-  })
-}
-start()
+
+    const caption = `🎬 *${data.Title}* (${data.Year})\n\n⭐ *IMDb:* ${data.imdbRating}/10\n🎭 *Genre:* ${data.Genre}\n⏱️ *Runtime:* ${data.Runtime}\n📅 *Released:* ${data.Released}\n\n📝 *Plot:*\n${data.Plot}\n\n👥 *Actors:* ${data.Actors}`
+
+    if (data.Poster && data.Poster !== "N/A") {
+      await ctx.replyWithPhoto(data.Poster, { caption: caption, parse_mode: 'Markdown' })
+    } else {
+      await ctx.reply(caption, { parse_mode: 'Markdown' })
+    }
+
+  } catch (e) {
+    console.log(e)
+    ctx.reply("Error එකක් ආවා බං, පස්සේ try කරන්න.")
+  }
+})
+
+bot.launch()
+console.log("Movie Bot Started!")
