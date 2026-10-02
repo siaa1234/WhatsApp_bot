@@ -59,7 +59,7 @@ bot.on('text', async (ctx) => {
             { text: '2K QHD', callback_data: `q_2k_${query}` }
           ],
           [
-            { text: '🌐 Visit Hansaka.lk', url: 'https://hansaka.lk' }
+            { text: '🌐 cinemaxlk.vercel.app, url: 'https:cinemaxlk.vercel.app' }
           ]
         ]
       }
@@ -96,7 +96,7 @@ bot.on('callback_query', async (ctx) => {
         }
       });
     } else {
-      await ctx.reply(`❌ ${quality} මේ Film එකට නෑ. API එකේ Links Check කරන්න.\n\nFound: ${myMovie? Object.keys(myMovie).join(', ') : 'No Movie'}`);
+      await ctx.reply(`❌ ${quality} මේ Film quality නෑ..\n\nFound: ${myMovie? Object.keys(myMovie).join(', ') : 'No Movie'}`);
     }
   } catch (e) {
     await ctx.reply('Error: ' + e.message);
