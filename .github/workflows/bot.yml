@@ -1,15 +1,18 @@
 name: Telegram Bot
 
 on:
-  workflow_dispatch:      # Manual start button
+  workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *' # පැය 5න් පස්සේ auto restart (6h limit එකට කලින්)
+    - cron: '0 */5 * * *'
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350   # 6h limit එකට කලින් ම stop වෙන්න
-
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,10 +22,23 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
-        run: npm install
+      - name: Debug - Show files
+        run: |
+          pwd
+          ls -la
+
+      - name: Install dependencies (direct install)
+        run: npm install telegraf btch-downloader
 
       - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: node index.js
+        run: |
+          # index.js repo එකේ තියෙනවා නම් ඒක run කරනවා
+          if [ -f index.js ]; then
+            node index.js
+          else
+            echo "❌ index.js එක repo එකේ හම්බුනේ නෑ!"
+            echo "GitHub repo එකේ index.js file එක commit කරන්න ඕන."
+            exit 1
+          fi
