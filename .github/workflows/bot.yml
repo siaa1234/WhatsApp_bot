@@ -26,19 +26,25 @@ jobs:
         run: |
           pwd
           ls -la
+          echo "--- checking alive.jpg ---"
+          ls -lh alive.jpg || echo "❌ alive.jpg not found in root!"
 
-      - name: Install dependencies (direct install)
-        run: npm install telegraf btch-downloader
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          else
+            npm install telegraf btch-downloader
+          fi
 
       - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OMDB_API: ${{ secrets.OMDB_API }}
         run: |
-          # index.js repo එකේ තියෙනවා නම් ඒක run කරනවා
           if [ -f index.js ]; then
             node index.js
           else
             echo "❌ index.js එක repo එකේ හම්බුනේ නෑ!"
-            echo "GitHub repo එකේ index.js file එක commit කරන්න ඕන."
             exit 1
           fi
