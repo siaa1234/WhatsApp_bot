@@ -1,31 +1,28 @@
-name: Hansaka MD Bot 24/7
+name: Telegram Bot
 
 on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:      # Manual start button
   schedule:
-    - cron: '0 */5 * * *'  # හැම පැය 5න්ම Auto Restart වෙනවා
+    - cron: '0 */5 * * *' # පැය 5න් පස්සේ auto restart (6h limit එකට කලින්)
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 350   # 6h limit එකට කලින් ම stop වෙන්න
+
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          
-      - name: Install Dependencies
-        run: |
-          npm init -y
-          npm install telegraf
+
+      - name: Install dependencies
+        run: npm install
 
       - name: Run Bot
-        run: node index.js
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          OMDB_API: ${{ secrets.OMDB_API }}
+        run: node index.js
