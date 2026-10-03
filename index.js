@@ -58,39 +58,38 @@ async function searchMyAPI(movieName) {
   }
 }
 
-// ================= START with LOCAL PHOTO =================
+// ================= START - FIXED (No Markdown Error) =================
 bot.start(async (ctx) => {
   const userName = ctx.from.first_name || 'User';
   const now = new Date();
   const date = now.toLocaleDateString('en-GB');
   const time = now.toLocaleTimeString('en-GB', { hour12: false });
 
-  const caption = `👋 𝐇𝐈, ${userName} [•_•L> 𝐈❜𝐀𝐌 Active 𝐍𝐎𝐖 👾
+  const caption = `👋 HI, ${userName} [•_•] I AM Active NOW 👾
 
-*╭─「 ᴅᴀᴛᴇ ɪɴꜰᴏʀᴍᴀᴛɪᴏɴ 」*
-*│*📅 *\`Date\`*: ${date}
-*│*⏰ *\`Time\`*: ${time}
-*╰──────────●●►*
+╭─「 DATE INFORMATION 」
+│📅 Date: ${date}
+│⏰ Time: ${time}
+╰──────────●●►
 
-*╭─「 ꜱᴛᴀᴛᴜꜱ ᴅᴇᴛᴀɪʟꜱ 」*
-*│*👤 *\`User\`*: ${userName}
-*│*🧬 *\`Version\`*: 6.0.0
-*│*🎈 *\`Platform\`*: Linux
-*│*📡 *\`Host\`*: github
-*╰──────────●●►*
-*╭─「 OUR film site」*
-*│*🚀 cinemaxlk.vercel.app
-*╰──────────●●►*
-*╭──────────●●►*
-*│* *Hello, I am alive now!!*
-*╰──────────●●►*`;
+╭─「 STATUS DETAILS 」
+│👤 User: ${userName}
+│🧬 Version: 6.0.0
+│🎈 Platform: Linux
+│📡 Host: github
+╰──────────●●►
+╭─「 OUR film site 」
+│🚀 cinemaxlk.vercel.app
+╰──────────●●►
+╭──────────●●►
+│ Hello, I am alive now!!
+╰──────────●●►`;
 
   try {
-    // Local alive.jpg එකෙන් යවනවා - GitHub Action එකේදී වැඩ
     if (fs.existsSync(ALIVE_LOCAL_PATH)) {
       await ctx.replyWithPhoto({ source: fs.createReadStream(ALIVE_LOCAL_PATH) }, {
         caption: caption,
-        parse_mode: 'Markdown',
+        // parse_mode අයින් කලා - එතකොට fancy font නිසා error එන්නේ නෑ
         reply_markup: {
           inline_keyboard: [
             [{ text: '🎬 Search Movie', switch_inline_query_current_chat: '' }],
@@ -99,12 +98,11 @@ bot.start(async (ctx) => {
         }
       });
     } else {
-      // File එක නැත්තම් text එක විතරක්
-      await ctx.reply(caption, { parse_mode: 'Markdown' });
+      await ctx.reply(caption);
     }
   } catch (e) {
     console.error('Alive photo error:', e.message);
-    await ctx.reply(caption, { parse_mode: 'Markdown' });
+    await ctx.reply(caption);
   }
 });
 
@@ -113,6 +111,7 @@ bot.on('text', async (ctx) => {
   const query = ctx.message.text?.trim();
   if (!query || query.startsWith('/')) return;
 
+  // 1. SOCIAL LINK
   const platform = detectPlatform(query);
   if (platform) {
     await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
@@ -129,15 +128,15 @@ bot.on('text', async (ctx) => {
     if (info.wm) row.push({ text: 'Watermark', callback_data: `dl_${id}_wm` });
     if (row.length === 0) row.push({ text: '📥 Download', callback_data: `dl_${id}_hd` });
 
-    await ctx.replyWithPhoto(info.thumb || { source: fs.createReadStream(ALIVE_LOCAL_PATH) }, {
-      caption: `🎬 *${(info.title || platform.toUpperCase()).slice(0, 100)}*\nQuality එකක් තෝරන්න 👇`,
-      parse_mode: 'Markdown',
+    const thumb = info.thumb? info.thumb : { source: fs.createReadStream(ALIVE_LOCAL_PATH) };
+    await ctx.replyWithPhoto(thumb, {
+      caption: `🎬 ${info.title || platform.toUpperCase()} \nQuality එකක් තෝරන්න 👇`,
       reply_markup: { inline_keyboard: [row] }
     });
     return;
   }
 
-  // MOVIE SEARCH
+  // 2. MOVIE SEARCH
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try {
     const omdbRes = await fetch(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
@@ -153,9 +152,10 @@ bot.on('text', async (ctx) => {
     movieCache.set(movieId, { query, title, myMovie, omdb });
     setTimeout(() => movieCache.delete(movieId), 600000);
 
-    await ctx.replyWithPhoto(poster || { source: fs.createReadStream(ALIVE_LOCAL_PATH) }, {
-      caption: `🎬 *${title}*\nQuality එකක් තෝරන්න 👇`,
-      parse_mode: 'Markdown',
+    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH)? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : 'https://via.placeholder.com/300x450?text=No+Poster');
+
+    await ctx.replyWithPhoto(photoSource, {
+      caption: `🎬 ${title}\nQuality එකක් තෝරන්න 👇`,
       reply_markup: {
         inline_keyboard: [
           [{ text: '480p', callback_data: `mq_${movieId}_480p` }, { text: '720p HD', callback_data: `mq_${movieId}_720p` }],
@@ -166,7 +166,7 @@ bot.on('text', async (ctx) => {
     });
   } catch (e) {
     console.error(e);
-    ctx.reply('❌ Error එකක් ආවා. ටිකකින් ආයේ try කරන්න.');
+    ctx.reply('❌ Error එකක් ආවා.');
   }
 });
 
@@ -178,7 +178,7 @@ bot.on('callback_query', async (ctx) => {
     await ctx.answerCbQuery();
     const [, id, quality] = data.split('_');
     const cached = socialCache.get(id);
-    if (!cached) return ctx.reply('⌛ Session expired වෙලා. Link එක ආයෙ එවන්න.');
+    if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     const link = pickQuality(cached.info, quality);
     if (!link) return ctx.reply('❌ මේ Quality එක නෑ.');
     await ctx.reply(`✅ ${cached.platform.toUpperCase()} - ${quality.toUpperCase()} Ready!`, {
@@ -211,8 +211,7 @@ bot.on('callback_query', async (ctx) => {
     await ctx.reply(`⏳ ${cached.title} - ${quality} ලෝඩ් කරනවා...`);
     const fileLink = cached.myMovie?.[quality] || cached.myMovie?.links?.[quality] || cached.myMovie?.downloadUrl || cached.myMovie?.url;
     if (fileLink) {
-      await ctx.reply(`✅ *${cached.title}* - ${quality} Ready!\n\n🔗 ${fileLink}`, {
-        parse_mode: 'Markdown',
+      await ctx.reply(`✅ ${cached.title} - ${quality} Ready!\n\n🔗 ${fileLink}`, {
         reply_markup: { inline_keyboard: [[{ text: `📥 Download ${quality}`, url: fileLink }]] }
       });
     } else {
