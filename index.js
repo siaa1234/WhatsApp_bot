@@ -1,17 +1,17 @@
 const { Telegraf } = require('telegraf');
-const { tikdow, igdow, fbdow } = require('btch-downloader');
+const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const OMDB_API = process.env.OMDB_API || 'c011220a';
+const OMDB_API = process.env.OMDB_API;
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 
 const bot = new Telegraf(BOT_TOKEN);
 
 // ================= SOCIAL CACHE =================
-// callback_data 64 chars limit නිසා link API response එක cache කරනවා
+// callback_data 64 chars limit නිසා API response එක cache කරනවා
 const socialCache = new Map();
 
-// ================= HELPERS =================
+// ================= SOCIAL HELPERS =================
 
 // --- Social link detect කරන තැන ---
 function detectPlatform(url) {
@@ -22,11 +22,24 @@ function detectPlatform(url) {
 }
 
 // --- Platform එක අනුව API call කරන තැන ---
+// btch-downloader functions: ttdl (TikTok), igdl (Instagram), fbdown (Facebook)
 async function getSocialLinks(platform, url) {
   try {
-    if (platform === 'tiktok')    return await tikdow(url);
-    if (platform === 'instagram') return await igdow(url);
-    if (platform === 'facebook')  return await fbdow(url);
+    if (platform === 'tiktok') {
+      const r = await ttdl(url);
+      console.log('TikTok response:', JSON.stringify(r).slice(0, 500));
+      return r;
+    }
+    if (platform === 'instagram') {
+      const r = await igdl(url);
+      console.log('Instagram response:', JSON.stringify(r).slice(0, 500));
+      return r;
+    }
+    if (platform === 'facebook') {
+      const r = await fbdown(url);
+      console.log('Facebook response:', JSON.stringify(r).slice(0, 500));
+      return r;
+    }
   } catch (e) {
     console.error('Social API error:', e.message);
   }
@@ -34,15 +47,42 @@ async function getSocialLinks(platform, url) {
 }
 
 // --- Quality එකට ගැලපෙන link එක තෝරන තැන ---
-// TikTok: { title, thumb, sd, hd, nowm, wm, audio }
-// Instagram: { title, thumb, high, low }
-// Facebook: { title, thumb, HD, SD }
+// TikTok:     { title, thumb, nowm, wm, audio }
+// Facebook:   { title, thumb, HD, SD }
+// Instagram:  { title, thumb, url: [links...] }
 function pickQuality(info, quality) {
-  if (quality === 'hd') {
-    return info.hd || info.HD || info.high || info.nowm || info.sd || info.SD || info.low;
+  // TikTok - nowm (no watermark)
+  if (info.nowm) {
+    if (quality === 'wm') return info.wm || info.nowm;
+    return info.nowm;
   }
-  // sd / low / fallback
-  return info.sd || info.SD || info.low || info.nowm || info.hd || info.HD || info.high;
+  // Facebook - HD / SD
+  if (quality === 'hd' && info.HD) return info.HD;
+  if (info.SD) return info.SD;
+  if (quality === 'hd' && info.hd) return info.hd;
+  if (info.sd) return info.sd;
+  if (info.high) return info.high;
+  // Instagram - url array එකක්
+  if (Array.isArray(info.url) && info.url.length > 0) {
+    return quality === 'hd' ? info.url[0] : info.url[info.url.length - 1];
+  }
+  if (typeof info.url === 'string') return info.url;
+  return null;
+}
+
+// --- Buttons හදන තැන (platform එකේ qualities අනුව) ---
+function buildQualityButtons(info, id) {
+  const row = [];
+  const hasHd = info.nowm || info.HD || info.hd || info.high || (Array.isArray(info.url) && info.url.length > 0);
+  const hasSd = info.SD || info.sd || info.low || (Array.isArray(info.url) && info.url.length > 1);
+  const hasWm = info.wm;
+
+  if (hasHd) row.push({ text: '720p HD', callback_data: `dl_${id}_hd` });
+  if (hasSd) row.push({ text: '360p SD', callback_data: `dl_${id}_sd` });
+  if (hasWm) row.push({ text: 'Watermark', callback_data: `dl_${id}_wm` });
+
+  if (row.length === 0) row.push({ text: '📥 Download', callback_data: `dl_${id}_hd` });
+  return row;
 }
 
 // ================= MOVIE API =================
@@ -54,12 +94,20 @@ async function searchMyAPI(movieName) {
     const data = await res.json();
     const movies = Array.isArray(data) ? data : data.movies || data.data || [];
     return movies.find(m => (m.title || m.name || '').toLowerCase().includes(movieName.toLowerCase()));
-  } catch (e) { return null; }
+  } catch (e) {
+    console.error('Movie API error:', e.message);
+    return null;
+  }
 }
 
 // ================= START =================
 
-bot.start((ctx) => ctx.reply('🎬 Bot Online! Film නමක් හෝ Social media video link එකක් එවන්න\n\n📱 Supported: TikTok, Instagram, Facebook\n🎬 Movies: Film නමක් type කරන්න'));
+bot.start((ctx) => ctx.reply(
+  '🎬 Bot Online!\n\n' +
+  '🎬 Film නමක් type කරන්න\n' +
+  '📱 Social video link එකක් එවන්න\n\n' +
+  'Supported: TikTok, Instagram, Facebook'
+));
 
 // ================= TEXT HANDLER =================
 
@@ -70,33 +118,30 @@ bot.on('text', async (ctx) => {
   // ---------- 1. SOCIAL MEDIA LINK එකක් නම් ----------
   const platform = detectPlatform(query);
   if (platform) {
-    await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
+    const statusMsg = await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
     const info = await getSocialLinks(platform, query);
 
     if (!info) {
       return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
     }
 
-    // Cache කරලා ID එකක් හදනවා
+    // Cache කරලා ID එකක් හදනවා (10 min expiry)
     const id = Date.now().toString(36);
     socialCache.set(id, { platform, url: query, info });
-    // 10 මිනිත්තලයකට පස්සේ cache entry එක delete
     setTimeout(() => socialCache.delete(id), 600000);
 
-    // API එකෙන් එන qualities අනුව buttons හදනවා
-    const row = [];
-    if (info.sd || info.SD || info.low || info.nowm) row.push({ text: '360p SD', callback_data: `dl_${id}_sd` });
-    if (info.hd || info.HD || info.high || info.nowm) row.push({ text: '720p HD', callback_data: `dl_${id}_hd` });
-    if (info.wm) row.push({ text: 'Watermark', callback_data: `dl_${id}_wm` });
+    // Analyzing message එක delete කරනවා (fail වුනත් ඉස්සරහට යනවා)
+    try { await ctx.deleteMessage(statusMsg.message_id); } catch (e) {}
 
-    if (row.length === 0) row.push({ text: '📥 Download', callback_data: `dl_${id}_hd` });
+    // Quality buttons හදනවා
+    const buttons = buildQualityButtons(info, id);
 
     await ctx.replyWithPhoto(info.thumb || 'https://via.placeholder.com/300x450?text=No+Thumb', {
-      caption: `🎬 *${info.title || platform.toUpperCase()} Video*\nQuality එකක් තෝරන්න 👇`,
+      caption: `🎬 *${(info.title || platform.toUpperCase()).slice(0, 100)}*\nQuality එකක් තෝරන්න 👇`,
       parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: [row] }
+      reply_markup: { inline_keyboard: [buttons] }
     });
-    return; // social link එකක් නම් movie search එකට යන්නේ නෑ
+    return; // social link නම් movie search එකට යන්නේ නෑ
   }
 
   // ---------- 2. MOVIE SEARCH ----------
@@ -159,7 +204,7 @@ bot.on('callback_query', async (ctx) => {
     await ctx.answerCbQuery('⏳ Uploading...');
     const [, id, quality] = data.split('_');
     const cached = socialCache.get(id);
-    if (!cached) return ctx.reply('⌛ Session expired.');
+    if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
 
     const link = pickQuality(cached.info, quality);
 
@@ -168,6 +213,7 @@ bot.on('callback_query', async (ctx) => {
         caption: `✅ ${cached.platform.toUpperCase()} ${quality.toUpperCase()}`
       });
     } catch (e) {
+      console.error('Upload error:', e.message);
       ctx.reply('❌ Upload වුනේ නෑ. File එක ලොකු වැඩි වෙන්න ඇති. Download button එකෙන් ගන්න.');
     }
     return;
@@ -188,7 +234,6 @@ bot.on('callback_query', async (ctx) => {
   const fileLink = myMovie?.[quality] || myMovie?.downloadUrl || myMovie?.url;
 
   if (fileLink) {
-    // Link එක direct යවනවා + Download button එකක්
     await ctx.reply(`✅ ${quality} Ready!\n\n🔗 ${fileLink}`, {
       reply_markup: {
         inline_keyboard: [[{ text: `📥 Download ${quality}`, url: fileLink }]]
@@ -199,10 +244,28 @@ bot.on('callback_query', async (ctx) => {
   }
 });
 
+// ================= ERROR HANDLING (crash නොවී ඉන්න) =================
+
+bot.catch((err, ctx) => {
+  console.error('Bot error:', err.message);
+  try { ctx.reply('⚠️ Error එකක් වුනා. නැවත උත්සාහ කරන්න.'); } catch (e) {}
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err.message);
+});
+
 // ================= LAUNCH =================
 
-bot.launch().then(() => console.log('Bot Started ✅'));
+bot.launch().then(() => console.log('Bot Started ✅'))
+  .catch(err => {
+    console.error('Launch failed:', err.message);
+    process.exit(1);
+  });
 
-// Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
