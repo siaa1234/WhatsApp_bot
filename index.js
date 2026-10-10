@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-// නිවැරදි function names මෙතැනට import කරන්න
 const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -40,8 +39,8 @@ async function getSocialLinks(platform, url) {
       res = await fbdown(url);
     }
     
-    // btch-downloader මඟින් සමහරවිට data array එකක් හෝ object එකක් දෙන්න පුළුවන්
-    return res?.data || res || null;
+    console.log(`${platform.toUpperCase()} API Response:`, JSON.stringify(res, null, 2)); // Debug කිරීමට console එකට print කරයි
+    return res;
   } catch (e) {
     console.error('Social API error:', e.message);
   }
@@ -49,15 +48,43 @@ async function getSocialLinks(platform, url) {
 }
 
 function pickQuality(info, quality) {
-  // Array එකක් හෝ object එකක් ආවොත් handle කිරීමට
-  const data = Array.isArray(info) ? info[0] : info;
-  if (!data) return null;
+  if (!info) return null;
 
-  // විවිධ format වලට links ගන්න හැටි
-  if (quality === 'hd') return data.hd || data.HD || data.high || data.url || data.nowm;
-  if (quality === 'sd') return data.sd || data.SD || data.low || data.url || data.nowm;
-  if (quality === 'wm') return data.wm || data.watermark;
-  return data.url || data.hd || data.sd || null;
+  // සමහර API responses වල data වෙනස් keys යටතේ තිබිය හැක
+  const resultObj = info.data || info.result || info;
+  
+  // Array එකක් නම් පළමු එක ගන්න
+  let item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
+  if (!item) return null;
+
+  // විවිධ format වල video links පරීක්ෂා කිරීම
+  let linksList = item.video || item.url || item.download || item.links || item;
+
+  if (Array.isArray(linksList)) {
+    // Quality එක අනුව array එකෙන් ಹುಡುකා ගැනීම
+    const found = linksList.find(v => (v.quality || '').toLowerCase().includes(quality));
+    if (found && found.url) return found.url;
+    return linksList[0].url || linksList[0];
+  }
+
+  if (typeof linksList === 'object' && linksList !== null) {
+    if (quality === 'hd') {
+      return linksList.hd || linksList.HD || linksList.high || linksList.nowm || linksList.url || linksList.video;
+    }
+    if (quality === 'sd') {
+      return linksList.sd || linksList.SD || linksList.low || linksList.url || linksList.nowm;
+    }
+    if (quality === 'wm') {
+      return linksList.wm || linksList.watermark || linksList.sd;
+    }
+    return linksList.url || linksList.hd || linksList.sd || linksList.nowm;
+  }
+
+  if (typeof linksList === 'string') {
+    return linksList;
+  }
+
+  return null;
 }
 
 async function searchMyAPI(movieName) {
@@ -135,23 +162,26 @@ bot.on('text', async (ctx) => {
     socialCache.set(id, { platform, url: query, info });
     setTimeout(() => socialCache.delete(id), 600000);
 
-    const row = [];
-    row.push({ text: '📥 Download Video', callback_data: `dl_${id}_hd` });
+    const row = [
+      { text: '📥 HD / Normal Download', callback_data: `dl_${id}_hd` }
+    ];
 
-    const thumb = info.thumb || info.thumbnail || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
+    const thumb = info.thumb || info.thumbnail || info.data?.thumbnail || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
     
     const replyOptions = {
-      caption: `🎬 ${platform.toUpperCase()} Video එක සූදානම්!\nQuality එකක් තෝරන්න 👇`,
+      caption: `🎬 ${platform.toUpperCase()} Video එක සූදානම්!\nDownload කිරීමට පහත Button එක ඔබන්න 👇`,
       reply_markup: { inline_keyboard: [row] }
     };
 
-    if (thumb && typeof thumb === 'string') {
-      await ctx.replyWithPhoto(thumb, replyOptions);
-    } else if (thumb) {
-      await ctx.replyWithPhoto(thumb, replyOptions);
-    } else {
-      await ctx.reply(replyOptions.caption, replyOptions.reply_markup);
+    if (thumb) {
+      try {
+        await ctx.replyWithPhoto(thumb, replyOptions);
+        return;
+      } catch (err) {
+        // Thumbnail එක URL එකක් වී එය load නොවූවොත් text පමණක් යවයි
+      }
     }
+    await ctx.reply(replyOptions.caption, replyOptions.reply_markup);
     return;
   }
 
@@ -198,13 +228,14 @@ bot.on('callback_query', async (ctx) => {
     const [, id, quality] = data.split('_');
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
+    
     const link = pickQuality(cached.info, quality);
-    if (!link) return ctx.reply('❌ මේ Quality එක නෑ.');
+    if (!link) return ctx.reply('❌ මේ video එකට අදාළ direct download link එක ලබාගත නොහැක.');
     
     await ctx.reply(`✅ ${cached.platform.toUpperCase()} Download Link Ready!`, {
       reply_markup: { 
         inline_keyboard: [
-          [{ text: '📥 Download', url: link }], 
+          [{ text: '📥 Download File', url: link }], 
           [{ text: '▶️ Watch in Telegram', callback_data: `send_${id}_${quality}` }]
         ] 
       }
@@ -217,11 +248,14 @@ bot.on('callback_query', async (ctx) => {
     const [, id, quality] = data.split('_');
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired.');
+    
     const link = pickQuality(cached.info, quality);
+    if (!link) return ctx.reply('❌ Video link එක හමුනෙ නැත.');
+
     try {
       await ctx.replyWithVideo(link, { caption: `✅ ${cached.platform.toUpperCase()} Video` });
     } catch (e) {
-      ctx.reply('❌ Upload වුනේ නෑ. File එක ලොකු වැඩි හෝ Telegram මඟින් direct stream කරන්න බැහැ. Download button එකෙන් ගන්න.');
+      ctx.reply('❌ Telegram වෙත upload කිරීම අසාර්ථකයි (File එක විශාල වැඩි විය හැක). Download button එක භාවිතා කරන්න.');
     }
     return;
   }
