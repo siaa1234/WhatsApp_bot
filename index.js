@@ -1,11 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-// නිවැරදි YouTube function එක 'youtube' ලෙස මෙතැනට import කර ඇත
-const { ttdl, igdl, fbdown, youtube } = require('btch-downloader');
+const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
+// ඔබ ලබා දුන් නිල YouTube Data API Key එක මෙහි ඇතුළත් කර ඇත
+const YOUTUBE_API_KEY = 'AIzaSyBmo2_cfffiJvts4fXtDnDLuqqINY7cTP0';
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, 'alive.jpg');
 
@@ -46,13 +47,45 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
+// YouTube URL එකකින් Video ID එක වෙන් කර ගැනීම
+function extractYouTubeId(url) {
+  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+  return match ? match[1] : null;
+}
+
+// YouTube Data API v3 මඟින් නිවැරදි Video Metadata ලබා ගැනීම
+async function getYouTubeMetadata(url) {
+  try {
+    const videoId = extractYouTubeId(url);
+    if (!videoId) return null;
+
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoId}&key=${YOUTUBE_API_KEY}`);
+    const data = await res.json();
+
+    if (!data.items || data.items.length === 0) return null;
+
+    const item = data.items[0];
+    return {
+      title: item.snippet.title,
+      author: item.snippet.channelTitle,
+      views: item.statistics.viewCount || 'N/A',
+      date: item.snippet.publishedAt ? item.snippet.publishedAt.split('T')[0] : 'N/A',
+      comments: item.statistics.commentCount || 'N/A',
+      thumb: item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.default?.url,
+      url: url
+    };
+  } catch (e) {
+    console.error('YouTube API error:', e.message);
+    return null;
+  }
+}
+
 async function getSocialLinks(platform, url) {
   try {
     let res;
     if (platform === 'tiktok') res = await ttdl(url);
     else if (platform === 'instagram') res = await igdl(url);
     else if (platform === 'facebook') res = await fbdown(url);
-    else if (platform === 'youtube') res = await youtube(url); // නිවැරදි function එක
     return res;
   } catch (e) {
     console.error('Social API error:', e.message);
@@ -75,8 +108,7 @@ function pickSocialQuality(info, quality) {
   }
 
   if (typeof linksList === 'object' && linksList !== null) {
-    // YouTube හෝ අනෙකුත් platform වල විවිධ quality keys පරීක්ෂා කිරීම
-    return linksList[quality] || linksList[`${quality}p`] || linksList.hd || linksList.sd || linksList.url || linksList.video;
+    return linksList[quality] || linksList.hd || linksList.sd || linksList.url;
   }
 
   if (typeof linksList === 'string') return linksList;
@@ -147,31 +179,21 @@ bot.on('text', async (ctx) => {
   const query = ctx.message.text?.trim();
   if (!query || query.startsWith('/')) return;
 
-  // 1. SOCIAL / YOUTUBE LINK
   const platform = detectPlatform(query);
   if (platform) {
     await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
-    const info = await getSocialLinks(platform, query);
-    if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
 
     const id = createId();
-    socialCache.set(id, { platform, url: query, info });
-    setTimeout(() => socialCache.delete(id), 600000);
 
-    const resultObj = info.data || info.result || info;
-    const item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
-
-    // Metadata ලබා ගැනීම (Title, Channel/Author, Views, Date, Comments)
-    const title = item?.title || 'Unknown Title';
-    const author = item?.author || item?.channel || item?.page || 'Unknown Creator';
-    const views = item?.views || item?.viewCount || 'N/A';
-    const date = item?.date || item?.uploadDate || 'N/A';
-    const comments = item?.comments || 'N/A';
-
-    // Quality Buttons (YouTube සඳහා 144p සිට 1080p දක්වා, අනෙක්വ සඳහා සාමාන්‍ය buttons)
-    let keyboard = [];
     if (platform === 'youtube') {
-      keyboard = [
+      // YouTube සඳහා නිල YouTube API v3 භාවිතා කිරීම
+      const ytInfo = await getYouTubeMetadata(query);
+      if (!ytInfo) return ctx.reply('❌ YouTube video විස්තර ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
+
+      socialCache.set(id, { platform: 'youtube', url: query, info: ytInfo });
+      setTimeout(() => socialCache.delete(id), 600000);
+
+      const keyboard = [
         [
           { text: '144p', callback_data: `soc_${id}_144p` },
           { text: '360p', callback_data: `soc_${id}_360p` },
@@ -182,19 +204,57 @@ bot.on('text', async (ctx) => {
           { text: '1080p FHD', callback_data: `soc_${id}_1080p` }
         ]
       ];
-    } else {
-      keyboard = [
-        [
-          { text: '📥 HD Video', callback_data: `soc_${id}_hd` },
-          { text: '📥 SD Video', callback_data: `soc_${id}_sd` }
-        ]
-      ];
+
+      const captionText = `🎬 **${ytInfo.title}**\n\n` +
+                          `👤 **Channel:** ${ytInfo.author}\n` +
+                          `👁️ **Views:** ${Number(ytInfo.views).toLocaleString()}\n` +
+                          `📅 **Release Date:** ${ytInfo.date}\n` +
+                          `💬 **Comments:** ${Number(ytInfo.comments).toLocaleString()}\n\n` +
+                          `👇 අවශ්‍ය Quality එක තෝරන්න:`;
+
+      const replyOptions = {
+        caption: captionText,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: keyboard }
+      };
+
+      if (ytInfo.thumb) {
+        try {
+          await ctx.replyWithPhoto(ytInfo.thumb, replyOptions);
+          return;
+        } catch (err) {}
+      }
+      await ctx.reply(captionText, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+      return;
     }
+
+    // TikTok, Instagram, Facebook සඳහා
+    const info = await getSocialLinks(platform, query);
+    if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
+
+    socialCache.set(id, { platform, url: query, info });
+    setTimeout(() => socialCache.delete(id), 600000);
+
+    const resultObj = info.data || info.result || info;
+    const item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
+
+    const title = item?.title || 'Unknown Title';
+    const author = item?.author || item?.channel || item?.page || 'Unknown Creator';
+    const views = item?.views || item?.viewCount || 'N/A';
+    const date = item?.date || item?.uploadDate || 'N/A';
+    const comments = item?.comments || 'N/A';
+
+    const keyboard = [
+      [
+        { text: '📥 HD Video', callback_data: `soc_${id}_hd` },
+        { text: '📥 SD Video', callback_data: `soc_${id}_sd` }
+      ]
+    ];
 
     const thumb = item?.thumb || item?.thumbnail || info.thumb || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
     
     const captionText = `🎬 **${title}**\n\n` +
-                        `👤 **Channel/Page:** ${author}\n` +
+                        `👤 **Page/Creator:** ${author}\n` +
                         `👁️ **Views:** ${views}\n` +
                         `📅 **Release Date:** ${date}\n` +
                         `💬 **Comments:** ${comments}\n\n` +
@@ -284,7 +344,7 @@ bot.on('callback_query', async (ctx) => {
 
   // Social / YouTube Video Send Handler
   if (data.startsWith('soc_')) {
-    await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
+    await ctx.answerCbQuery('⏳ Video එක සකසමින් පවතී...');
     const parts = data.split('_');
     const id = parts[1];
     const quality = parts[2];
@@ -292,6 +352,11 @@ bot.on('callback_query', async (ctx) => {
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
+    if (cached.platform === 'youtube') {
+      await ctx.reply(`ℹ️ YouTube වීඩියෝ ඩවුන්ලෝඩ් කිරීම සඳහා ඔබ වෙනත් සුදුසු stream downloader එකක් හෝ API එකක් (උදා: cobalt.tools API) භාවිතා කළ යුතුය. YouTube Data API මඟින් වීඩියෝ විස්තර සහ දත්ත පමණක් ලබාගත හැක.`);
+      return;
+    }
+
     let link = pickSocialQuality(cached.info, quality);
     if (!link) return ctx.reply('❌ මේ Quality එකට අදාළ video file එක ලබාගත නොහැක.');
 
@@ -343,7 +408,7 @@ bot.on('callback_query', async (ctx) => {
         { caption: `✅ Successfully Downloaded & Uploaded!` }
       );
       
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+      try { await ctx.telegram.deleteName ? await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id) : null; } catch(e) {}
     } catch (e) {
       console.error('Video upload error:', e.message);
       try {
@@ -364,10 +429,10 @@ bot.on('callback_query', async (ctx) => {
     const quality = parts[2];
     const cached = movieCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Film නම ආයෙ එවන්න.');
-    await ctx.reply(`⏳ ${cached.title} - ${quality} ලෝඩ් කරනවා...`);
+    await ctx.reply(`⏳ ${cached.title} -${quality} ලෝඩ් කරනවා...`);
     const fileLink = cached.myMovie?.[quality] || cached.myMovie?.links?.[quality] || cached.myMovie?.downloadUrl || cached.myMovie?.url;
     if (fileLink) {
-      await ctx.reply(`✅ ${cached.title} - ${quality} Ready!\n\n🔗 ${fileLink}`, {
+      await ctx.reply(`✅ ${cached.title} - `${quality} Ready!\n\n🔗 ${fileLink}`, {
         reply_markup: { inline_keyboard: [[{ text: `📥 Download ${quality}`, url: fileLink }]] }
       });
     } else {
