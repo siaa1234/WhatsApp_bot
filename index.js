@@ -5,7 +5,8 @@ const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
-const YOUTUBE_API_KEY = 'AIzaSyBmo2_cfffiJvts4fXtDnDLuqqINY7cTP0';
+// ඔබ අලුතින් ලබා දුන් YouTube API Key එක මෙහි ඇතුළත් කර ඇත
+const YOUTUBE_API_KEY = 'AIzaSyBAd2fAvPkZNaQn5B45vkqwaIalnG8qUrc'; 
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, 'alive.jpg');
 
@@ -77,7 +78,7 @@ async function getYouTubeMetadata(url) {
   }
 }
 
-// Cobalt API මඟින් YouTube video download link එක ලබා ගැනීම
+// Cobalt API හරහා YouTube වීඩියෝ ඩවුන්ලෝඩ් ලින්ක් ලබා ගැනීම
 async function getCobaltDownloadLink(url, quality) {
   try {
     const res = await fetch('https://api.cobalt.tools/api/json', {
@@ -213,7 +214,6 @@ bot.on('text', async (ctx) => {
       socialCache.set(id, { platform: 'youtube', url: query, info: ytInfo });
       setTimeout(() => socialCache.delete(id), 600000);
 
-      // YouTube සඳහා 144p, 360p, 480p, 720p, 1080p Quality Buttons
       const keyboard = [
         [
           { text: '144p', callback_data: `soc_${id}_144` },
@@ -364,7 +364,7 @@ bot.on('callback_query', async (ctx) => {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const parts = data.split('_');
     const id = parts[1];
-    const quality = parts[2]; // '144', '360', '480', '720', '1080' හෝ 'hd', 'sd'
+    const quality = parts[2];
     
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
