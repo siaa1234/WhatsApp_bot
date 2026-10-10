@@ -5,8 +5,6 @@ const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
-// ඔබ අලුතින් ලබා දුන් YouTube API Key එක මෙහි ඇතුළත් කර ඇත
-const YOUTUBE_API_KEY = 'AIzaSyBAd2fAvPkZNaQn5B45vkqwaIalnG8qUrc'; 
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, 'alive.jpg');
 
@@ -47,39 +45,8 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
-function extractYouTubeId(url) {
-  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-  return match ? match[1] : null;
-}
-
-async function getYouTubeMetadata(url) {
-  try {
-    const videoId = extractYouTubeId(url);
-    if (!videoId) return null;
-
-    const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoId}&key=${YOUTUBE_API_KEY}`);
-    const data = await res.json();
-
-    if (!data.items || data.items.length === 0) return null;
-
-    const item = data.items[0];
-    return {
-      title: item.snippet.title,
-      author: item.snippet.channelTitle,
-      views: item.statistics.viewCount || 'N/A',
-      date: item.snippet.publishedAt ? item.snippet.publishedAt.split('T')[0] : 'N/A',
-      comments: item.statistics.commentCount || 'N/A',
-      thumb: item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.default?.url,
-      url: url
-    };
-  } catch (e) {
-    console.error('YouTube API error:', e.message);
-    return null;
-  }
-}
-
-// Cobalt API හරහා YouTube වීඩියෝ ඩවුන්ලෝඩ් ලින්ක් ලබා ගැනීම
-async function getCobaltDownloadLink(url, quality) {
+// Cobalt API මඟින් YouTube වීඩියෝව සහ එහි විස්තර ලබා ගැනීම
+async function getCobaltData(url) {
   try {
     const res = await fetch('https://api.cobalt.tools/api/json', {
       method: 'POST',
@@ -87,15 +54,10 @@ async function getCobaltDownloadLink(url, quality) {
         'Accept': 'application/json',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        url: url,
-        videoQuality: quality // '144', '360', '480', '720', '1080'
-      })
+      body: JSON.stringify({ url: url })
     });
     const data = await res.json();
-    if (data && data.url) {
-      return data.url;
-    }
+    return data;
   } catch (e) {
     console.error('Cobalt API error:', e.message);
   }
@@ -208,10 +170,12 @@ bot.on('text', async (ctx) => {
     const id = createId();
 
     if (platform === 'youtube') {
-      const ytInfo = await getYouTubeMetadata(query);
-      if (!ytInfo) return ctx.reply('❌ YouTube video විස්තර ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
+      const ytData = await getCobaltData(query);
+      if (!ytData || !ytData.url && !ytData.picker) {
+        return ctx.reply('❌ YouTube video එක ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
+      }
 
-      socialCache.set(id, { platform: 'youtube', url: query, info: ytInfo });
+      socialCache.set(id, { platform: 'youtube', url: query, info: ytData });
       setTimeout(() => socialCache.delete(id), 600000);
 
       const keyboard = [
@@ -226,11 +190,8 @@ bot.on('text', async (ctx) => {
         ]
       ];
 
-      const captionText = `🎬 **${ytInfo.title}**\n\n` +
-                          `👤 **Channel:** ${ytInfo.author}\n` +
-                          `👁️ **Views:** ${Number(ytInfo.views).toLocaleString()}\n` +
-                          `📅 **Release Date:** ${ytInfo.date}\n` +
-                          `💬 **Comments:** ${Number(ytInfo.comments).toLocaleString()}\n\n` +
+      const title = ytData.filename || 'YouTube Video';
+      const captionText = `🎬 **${title}**\n\n` +
                           `👇 අවශ්‍ය Quality එක තෝරන්න:`;
 
       const replyOptions = {
@@ -239,9 +200,9 @@ bot.on('text', async (ctx) => {
         reply_markup: { inline_keyboard: keyboard }
       };
 
-      if (ytInfo.thumb) {
+      if (ytData.thumbnail) {
         try {
-          await ctx.replyWithPhoto(ytInfo.thumb, replyOptions);
+          await ctx.replyWithPhoto(ytData.thumbnail, replyOptions);
           return;
         } catch (err) {}
       }
@@ -374,7 +335,9 @@ bot.on('callback_query', async (ctx) => {
 
     try {
       if (cached.platform === 'youtube') {
-        link = await getCobaltDownloadLink(cached.url, quality);
+        // අදාළ quality එකට cobalt හරහා නැවත fetch කිරීම
+        const freshData = await getCobaltData(cached.url);
+        link = freshData?.url || freshData?.picker?.[0]?.url;
       } else {
         link = pickSocialQuality(cached.info, quality);
       }
