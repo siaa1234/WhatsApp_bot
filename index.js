@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-const { ttdl, igdl, fbdown, ytdl } = require('btch-downloader'); // හෝ සුදුසු YouTube downloader එකක්
+// නිවැරදි YouTube function එක 'youtube' ලෙස මෙතැනට import කර ඇත
+const { ttdl, igdl, fbdown, youtube } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
@@ -51,7 +52,7 @@ async function getSocialLinks(platform, url) {
     if (platform === 'tiktok') res = await ttdl(url);
     else if (platform === 'instagram') res = await igdl(url);
     else if (platform === 'facebook') res = await fbdown(url);
-    else if (platform === 'youtube') res = await ytdl(url);
+    else if (platform === 'youtube') res = await youtube(url); // නිවැරදි function එක
     return res;
   } catch (e) {
     console.error('Social API error:', e.message);
@@ -74,12 +75,8 @@ function pickSocialQuality(info, quality) {
   }
 
   if (typeof linksList === 'object' && linksList !== null) {
-    if (quality === '1080p') return linksList['1080p'] || linksList.hd || linksList.HD || linksList.url;
-    if (quality === '720p') return linksList['720p'] || linksList.hd || linksList.url;
-    if (quality === '480p') return linksList['480p'] || linksList.sd || linksList.url;
-    if (quality === '360p') return linksList['360p'] || linksList.sd || linksList.url;
-    if (quality === '144p') return linksList['144p'] || linksList.low || linksList.url;
-    return linksList.url || linksList.hd || linksList.sd;
+    // YouTube හෝ අනෙකුත් platform වල විවිධ quality keys පරීක්ෂා කිරීම
+    return linksList[quality] || linksList[`${quality}p`] || linksList.hd || linksList.sd || linksList.url || linksList.video;
   }
 
   if (typeof linksList === 'string') return linksList;
@@ -164,14 +161,14 @@ bot.on('text', async (ctx) => {
     const resultObj = info.data || info.result || info;
     const item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
 
-    // Metadata ලබා ගැනීම (Title, Channel, Views, Date, Comments ආදී විස්තර)
+    // Metadata ලබා ගැනීම (Title, Channel/Author, Views, Date, Comments)
     const title = item?.title || 'Unknown Title';
     const author = item?.author || item?.channel || item?.page || 'Unknown Creator';
     const views = item?.views || item?.viewCount || 'N/A';
     const date = item?.date || item?.uploadDate || 'N/A';
     const comments = item?.comments || 'N/A';
 
-    // Quality Buttons (YouTube සඳහා සියලුම 144p සිට 1080p දක්වා සහ අනෙක්വ සඳහා සාමාන්‍ය button)
+    // Quality Buttons (YouTube සඳහා 144p සිට 1080p දක්වා, අනෙක්വ සඳහා සාමාන්‍ය buttons)
     let keyboard = [];
     if (platform === 'youtube') {
       keyboard = [
