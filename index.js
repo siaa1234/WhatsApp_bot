@@ -1,8 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-// Facebook සහ Instagram සඳහා අවශ්‍ය downloader එක නැවත එක් කරන ලදී
-const { igdl, fbdown } = require('btch-downloader');
+const { ttdl, igdl, fbdown, ytdl } = require('btch-downloader'); // හෝ සුදුසු YouTube downloader එකක්
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
@@ -24,8 +23,10 @@ function createId() {
 
 // ================= HELPERS =================
 function detectPlatform(url) {
+  if (/(tiktok\.com)/i.test(url)) return 'tiktok';
   if (/(instagram\.com)/i.test(url)) return 'instagram';
   if (/(facebook\.com|fb\.watch)/i.test(url)) return 'facebook';
+  if (/(youtube\.com|youtu\.be)/i.test(url)) return 'youtube';
   return null;
 }
 
@@ -47,11 +48,10 @@ function convertGoogleDriveLink(url) {
 async function getSocialLinks(platform, url) {
   try {
     let res;
-    if (platform === 'instagram') {
-      res = await igdl(url);
-    } else if (platform === 'facebook') {
-      res = await fbdown(url);
-    }
+    if (platform === 'tiktok') res = await ttdl(url);
+    else if (platform === 'instagram') res = await igdl(url);
+    else if (platform === 'facebook') res = await fbdown(url);
+    else if (platform === 'youtube') res = await ytdl(url);
     return res;
   } catch (e) {
     console.error('Social API error:', e.message);
@@ -74,19 +74,15 @@ function pickSocialQuality(info, quality) {
   }
 
   if (typeof linksList === 'object' && linksList !== null) {
-    if (quality === 'hd') {
-      return linksList.hd || linksList.HD || linksList.high || linksList.url || linksList.video;
-    }
-    if (quality === 'sd') {
-      return linksList.sd || linksList.SD || linksList.low || linksList.url;
-    }
+    if (quality === '1080p') return linksList['1080p'] || linksList.hd || linksList.HD || linksList.url;
+    if (quality === '720p') return linksList['720p'] || linksList.hd || linksList.url;
+    if (quality === '480p') return linksList['480p'] || linksList.sd || linksList.url;
+    if (quality === '360p') return linksList['360p'] || linksList.sd || linksList.url;
+    if (quality === '144p') return linksList['144p'] || linksList.low || linksList.url;
     return linksList.url || linksList.hd || linksList.sd;
   }
 
-  if (typeof linksList === 'string') {
-    return linksList;
-  }
-
+  if (typeof linksList === 'string') return linksList;
   return null;
 }
 
@@ -154,7 +150,7 @@ bot.on('text', async (ctx) => {
   const query = ctx.message.text?.trim();
   if (!query || query.startsWith('/')) return;
 
-  // 1. INSTAGRAM / FACEBOOK LINK
+  // 1. SOCIAL / YOUTUBE LINK
   const platform = detectPlatform(query);
   if (platform) {
     await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
@@ -165,25 +161,67 @@ bot.on('text', async (ctx) => {
     socialCache.set(id, { platform, url: query, info });
     setTimeout(() => socialCache.delete(id), 600000);
 
-    const row = [
-      { text: '📥 HD Video', callback_data: `soc_${id}_hd` },
-      { text: '📥 SD Video', callback_data: `soc_${id}_sd` }
-    ];
+    const resultObj = info.data || info.result || info;
+    const item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
 
-    const thumb = info.thumb || info.thumbnail || info.data?.thumbnail || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
+    // Metadata ලබා ගැනීම (Title, Channel, Views, Date, Comments ආදී විස්තර)
+    const title = item?.title || 'Unknown Title';
+    const author = item?.author || item?.channel || item?.page || 'Unknown Creator';
+    const views = item?.views || item?.viewCount || 'N/A';
+    const date = item?.date || item?.uploadDate || 'N/A';
+    const comments = item?.comments || 'N/A';
+
+    // Quality Buttons (YouTube සඳහා සියලුම 144p සිට 1080p දක්වා සහ අනෙක්വ සඳහා සාමාන්‍ය button)
+    let keyboard = [];
+    if (platform === 'youtube') {
+      keyboard = [
+        [
+          { text: '144p', callback_data: `soc_${id}_144p` },
+          { text: '360p', callback_data: `soc_${id}_360p` },
+          { text: '480p', callback_data: `soc_${id}_480p` }
+        ],
+        [
+          { text: '720p HD', callback_data: `soc_${id}_720p` },
+          { text: '1080p FHD', callback_data: `soc_${id}_1080p` }
+        ]
+      ];
+    } else {
+      keyboard = [
+        [
+          { text: '📥 HD Video', callback_data: `soc_${id}_hd` },
+          { text: '📥 SD Video', callback_data: `soc_${id}_sd` }
+        ]
+      ];
+    }
+
+    const thumb = item?.thumb || item?.thumbnail || info.thumb || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
     
+    const captionText = `🎬 **${title}**\n\n` +
+                        `👤 **Channel/Page:** ${author}\n` +
+                        `👁️ **Views:** ${views}\n` +
+                        `📅 **Release Date:** ${date}\n` +
+                        `💬 **Comments:** ${comments}\n\n` +
+                        `👇 අවශ්‍ය Quality එක තෝරන්න:`;
+
     const replyOptions = {
-      caption: `🎬 ${platform.toUpperCase()} Video එක සූදානම්!\nකරුණාකර අවශ්‍ය Quality එක තෝරන්න 👇`,
-      reply_markup: { inline_keyboard: [row] }
+      caption: captionText,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: keyboard }
     };
 
-    if (thumb) {
+    if (thumb && typeof thumb === 'string') {
+      try {
+        await ctx.replyWithPhoto(thumb, replyOptions);
+        return;
+      } catch (err) {}
+    } else if (thumb) {
       try {
         await ctx.replyWithPhoto(thumb, replyOptions);
         return;
       } catch (err) {}
     }
-    await ctx.reply(replyOptions.caption, replyOptions.reply_markup);
+    
+    await ctx.reply(captionText, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
     return;
   }
 
@@ -247,7 +285,7 @@ bot.on('text', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
-  // Instagram / Facebook Video Send Handler
+  // Social / YouTube Video Send Handler
   if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const parts = data.split('_');
@@ -258,7 +296,7 @@ bot.on('callback_query', async (ctx) => {
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
     let link = pickSocialQuality(cached.info, quality);
-    if (!link) return ctx.reply('❌ මේ link එකට අදාළ video file එක ලබාගත නොහැක.');
+    if (!link) return ctx.reply('❌ මේ Quality එකට අදාළ video file එක ලබාගත නොහැක.');
 
     const statusMsg = await ctx.reply(`⏳ ${cached.platform.toUpperCase()} video එක Telegram වෙත upload කරමින් පවතී...`);
 
@@ -270,14 +308,14 @@ bot.on('callback_query', async (ctx) => {
 
       await ctx.replyWithVideo(
         { source: buffer, filename: `video.mp4` }, 
-        { caption: `✅ Successfully Downloaded & Uploaded!` }
+        { caption: `✅ Successfully Downloaded & Uploaded! (${quality})` }
       );
       
       try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
     } catch (e) {
       console.error('Video upload error:', e.message);
       try {
-        await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded!` });
+        await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded! (${quality})` });
         try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
       } catch (err) {
         ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක විශාල වැඩි විය හැක.');
