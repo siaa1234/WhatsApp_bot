@@ -77,6 +77,30 @@ async function getYouTubeMetadata(url) {
   }
 }
 
+// Cobalt API මඟින් YouTube video download link එක ලබා ගැනීම
+async function getCobaltDownloadLink(url, quality) {
+  try {
+    const res = await fetch('https://api.cobalt.tools/api/json', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        url: url,
+        videoQuality: quality // '144', '360', '480', '720', '1080'
+      })
+    });
+    const data = await res.json();
+    if (data && data.url) {
+      return data.url;
+    }
+  } catch (e) {
+    console.error('Cobalt API error:', e.message);
+  }
+  return null;
+}
+
 async function getSocialLinks(platform, url) {
   try {
     let res;
@@ -189,15 +213,16 @@ bot.on('text', async (ctx) => {
       socialCache.set(id, { platform: 'youtube', url: query, info: ytInfo });
       setTimeout(() => socialCache.delete(id), 600000);
 
+      // YouTube සඳහා 144p, 360p, 480p, 720p, 1080p Quality Buttons
       const keyboard = [
         [
-          { text: '144p', callback_data: `soc_${id}_144p` },
-          { text: '360p', callback_data: `soc_${id}_360p` },
-          { text: '480p', callback_data: `soc_${id}_480p` }
+          { text: '144p', callback_data: `soc_${id}_144` },
+          { text: '360p', callback_data: `soc_${id}_360` },
+          { text: '480p', callback_data: `soc_${id}_480` }
         ],
         [
-          { text: '720p HD', callback_data: `soc_${id}_720p` },
-          { text: '1080p FHD', callback_data: `soc_${id}_1080p` }
+          { text: '720p HD', callback_data: `soc_${id}_720` },
+          { text: '1080p FHD', callback_data: `soc_${id}_1080` }
         ]
       ];
 
@@ -336,25 +361,29 @@ bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
   if (data.startsWith('soc_')) {
-    await ctx.answerCbQuery('⏳ Video එක සකසමින් පවතී...');
+    await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const parts = data.split('_');
     const id = parts[1];
-    const quality = parts[2];
+    const quality = parts[2]; // '144', '360', '480', '720', '1080' හෝ 'hd', 'sd'
     
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
-    if (cached.platform === 'youtube') {
-      await ctx.reply(`ℹ️ YouTube වීඩියෝ ඩවුන්ලෝඩ් කිරීම සඳහා cobalt.tools වැනි API එකක් හෝ ytdl-core භාවිතා කළ යුතුය. YouTube Data API මඟින් වීඩියෝ විස්තර සහ දත්ත පමණක් ලබාගත හැක.`);
-      return;
-    }
-
-    let link = pickSocialQuality(cached.info, quality);
-    if (!link) return ctx.reply('❌ මේ Quality එකට අදාළ video file එක ලබාගත නොහැක.');
-
-    const statusMsg = await ctx.reply(`⏳ ${cached.platform.toUpperCase()} video එක Telegram වෙත upload කරමින් පවතී...`);
+    let link = null;
+    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී...`);
 
     try {
+      if (cached.platform === 'youtube') {
+        link = await getCobaltDownloadLink(cached.url, quality);
+      } else {
+        link = pickSocialQuality(cached.info, quality);
+      }
+
+      if (!link) {
+        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+        return ctx.reply('❌ මේ Quality එකට අදාළ direct download link එක ලබාගත නොහැක.');
+      }
+
       const response = await fetch(link);
       if (!response.ok) throw new Error('Failed to fetch video stream');
       const arrayBuffer = await response.arrayBuffer();
@@ -362,16 +391,21 @@ bot.on('callback_query', async (ctx) => {
 
       await ctx.replyWithVideo(
         { source: buffer, filename: `video.mp4` }, 
-        { caption: `✅ Successfully Downloaded & Uploaded! (${quality})` }
+        { caption: `✅ Successfully Downloaded & Uploaded! (${quality}p)` }
       );
       
       try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
     } catch (e) {
       console.error('Video upload error:', e.message);
       try {
-        await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded! (${quality})` });
+        if (link) {
+          await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded! (${quality}p)` });
+        } else {
+          throw new Error('No link available');
+        }
         try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
       } catch (err) {
+        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
         ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක විශාල වැඩි විය හැක.');
       }
     }
@@ -406,6 +440,7 @@ bot.on('callback_query', async (ctx) => {
         await ctx.replyWithVideo(cached.url, { caption: `✅ Successfully Uploaded!` });
         try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
       } catch (err) {
+        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
         ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක 4GB වඩා වැඩි වීමට හෝ direct video format එකක් නොවීමට ඉඩ ඇත.');
       }
     }
