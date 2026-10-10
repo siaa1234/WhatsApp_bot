@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-const { ttdl, igdl, fbdown } = require('btch-downloader');
+// Facebook සහ Instagram සඳහා අවශ්‍ය downloader එක නැවත එක් කරන ලදී
+const { igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
@@ -14,6 +15,7 @@ const bot = new Telegraf(BOT_TOKEN);
 
 // ================= CACHE =================
 const socialCache = new Map();
+const directCache = new Map();
 const movieCache = new Map();
 
 function createId() {
@@ -22,20 +24,17 @@ function createId() {
 
 // ================= HELPERS =================
 function detectPlatform(url) {
-  if (/(tiktok\.com)/i.test(url)) return 'tiktok';
   if (/(instagram\.com)/i.test(url)) return 'instagram';
   if (/(facebook\.com|fb\.watch)/i.test(url)) return 'facebook';
   return null;
 }
 
-// Google Drive හෝ Direct Download Link එකක්දැයි පරීක්ෂා කිරීම
 function detectDirectLink(url) {
   if (/(drive\.google\.com|docs\.google\.com)/i.test(url)) return 'gdrive';
-  if (/\.(mp4|mkv|avi|mov|webm)(\?.*)?$/i.test(url) || url.includes('download') || url.includes('dl=')) return 'direct';
+  if (/^https?:\/\/.+/i.test(url)) return 'direct';
   return null;
 }
 
-// Google Drive share link එක direct download link එකක් බවට හැරවීම
 function convertGoogleDriveLink(url) {
   const match = url.match(/\/d\/(.*?)\/|\?id=(.*?)(&|$)/);
   const fileId = match ? (match[1] || match[2]) : null;
@@ -48,9 +47,7 @@ function convertGoogleDriveLink(url) {
 async function getSocialLinks(platform, url) {
   try {
     let res;
-    if (platform === 'tiktok') {
-      res = await ttdl(url);
-    } else if (platform === 'instagram') {
+    if (platform === 'instagram') {
       res = await igdl(url);
     } else if (platform === 'facebook') {
       res = await fbdown(url);
@@ -62,7 +59,7 @@ async function getSocialLinks(platform, url) {
   return null;
 }
 
-function pickQuality(info, quality) {
+function pickSocialQuality(info, quality) {
   if (!info) return null;
   const resultObj = info.data || info.result || info;
   let item = Array.isArray(resultObj) ? resultObj[0] : resultObj;
@@ -78,12 +75,12 @@ function pickQuality(info, quality) {
 
   if (typeof linksList === 'object' && linksList !== null) {
     if (quality === 'hd') {
-      return linksList.hd || linksList.HD || linksList.high || linksList.nowm || linksList.url || linksList.video;
+      return linksList.hd || linksList.HD || linksList.high || linksList.url || linksList.video;
     }
     if (quality === 'sd') {
-      return linksList.sd || linksList.SD || linksList.low || linksList.url || linksList.nowm;
+      return linksList.sd || linksList.SD || linksList.low || linksList.url;
     }
-    return linksList.url || linksList.hd || linksList.sd || linksList.nowm;
+    return linksList.url || linksList.hd || linksList.sd;
   }
 
   if (typeof linksList === 'string') {
@@ -157,7 +154,7 @@ bot.on('text', async (ctx) => {
   const query = ctx.message.text?.trim();
   if (!query || query.startsWith('/')) return;
 
-  // 1. SOCIAL LINK
+  // 1. INSTAGRAM / FACEBOOK LINK
   const platform = detectPlatform(query);
   if (platform) {
     await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
@@ -169,8 +166,8 @@ bot.on('text', async (ctx) => {
     setTimeout(() => socialCache.delete(id), 600000);
 
     const row = [
-      { text: '📥 HD Video', callback_data: `send_${id}_hd` },
-      { text: '📥 SD Video', callback_data: `send_${id}_sd` }
+      { text: '📥 HD Video', callback_data: `soc_${id}_hd` },
+      { text: '📥 SD Video', callback_data: `soc_${id}_sd` }
     ];
 
     const thumb = info.thumb || info.thumbnail || info.data?.thumbnail || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
@@ -190,22 +187,22 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // 2. G DRIVE / DIRECT LINK
+  // 2. DIRECT LINK / GOOGLE DRIVE LINK
   const directType = detectDirectLink(query);
   if (directType) {
-    const id = createId();
     let finalUrl = query;
     if (directType === 'gdrive') {
       finalUrl = convertGoogleDriveLink(query);
     }
 
-    socialCache.set(id, { platform: directType, url: finalUrl, info: { url: finalUrl } });
-    setTimeout(() => socialCache.delete(id), 600000);
+    const id = createId();
+    directCache.set(id, { url: finalUrl });
+    setTimeout(() => directCache.delete(id), 600000);
 
-    await ctx.reply(`🔗 Direct/G-Drive link එක හඳුනාගැනිණි!`, {
+    await ctx.reply(`🔗 Link එක සාර්ථකව හඳුනාගැනිණි!`, {
       reply_markup: {
         inline_keyboard: [
-          [{ text: '📥 Send as Telegram Video', callback_data: `send_${id}_direct` }]
+          [{ text: '📥 Send as Telegram Video (MP4)', callback_data: `send_${id}` }]
         ]
       }
     });
@@ -250,8 +247,8 @@ bot.on('text', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
-  // Social Video & Direct Link Send (MP4 File)
-  if (data.startsWith('send_')) {
+  // Instagram / Facebook Video Send Handler
+  if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const parts = data.split('_');
     const id = parts[1];
@@ -260,7 +257,7 @@ bot.on('callback_query', async (ctx) => {
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
-    let link = cached.info.url || pickQuality(cached.info, quality);
+    let link = pickSocialQuality(cached.info, quality);
     if (!link) return ctx.reply('❌ මේ link එකට අදාළ video file එක ලබාගත නොහැක.');
 
     const statusMsg = await ctx.reply(`⏳ ${cached.platform.toUpperCase()} video එක Telegram වෙත upload කරමින් පවතී...`);
@@ -273,7 +270,7 @@ bot.on('callback_query', async (ctx) => {
 
       await ctx.replyWithVideo(
         { source: buffer, filename: `video.mp4` }, 
-        { caption: `✅ Successfully Uploaded!` }
+        { caption: `✅ Successfully Downloaded & Uploaded!` }
       );
       
       try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
@@ -283,7 +280,42 @@ bot.on('callback_query', async (ctx) => {
         await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded!` });
         try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
       } catch (err) {
-        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක ඉතා විශාල වැඩි විය හැක හෝ Direct access නැත.');
+        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක විශාල වැඩි විය හැක.');
+      }
+    }
+    return;
+  }
+
+  // Direct Link / GDrive Video Send Handler
+  if (data.startsWith('send_')) {
+    await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
+    const id = data.split('_')[1];
+    
+    const cached = directCache.get(id);
+    if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
+    
+    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී (මෙයට ටික වේලාවක් ගත විය හැක)...`);
+
+    try {
+      const response = await fetch(cached.url);
+      if (!response.ok) throw new Error('Failed to fetch video stream from URL');
+      
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      await ctx.replyWithVideo(
+        { source: buffer, filename: `video.mp4` }, 
+        { caption: `✅ Successfully Downloaded & Uploaded!` }
+      );
+      
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+    } catch (e) {
+      console.error('Video upload error:', e.message);
+      try {
+        await ctx.replyWithVideo(cached.url, { caption: `✅ Successfully Uploaded!` });
+        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+      } catch (err) {
+        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක 4GB වඩා වැඩි වීමට හෝ direct video format එකක් නොවීමට ඉඩ ඇත.');
       }
     }
     return;
