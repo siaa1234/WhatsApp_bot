@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const { Telegraf } = require('telegraf');
-const { tikdow, igdow, fbdow } = require('btch-downloader');
+// නිවැරදි function names මෙතැනට import කරන්න
+const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
@@ -30,9 +31,17 @@ function detectPlatform(url) {
 
 async function getSocialLinks(platform, url) {
   try {
-    if (platform === 'tiktok') return await tikdow(url);
-    if (platform === 'instagram') return await igdow(url);
-    if (platform === 'facebook') return await fbdow(url);
+    let res;
+    if (platform === 'tiktok') {
+      res = await ttdl(url);
+    } else if (platform === 'instagram') {
+      res = await igdl(url);
+    } else if (platform === 'facebook') {
+      res = await fbdown(url);
+    }
+    
+    // btch-downloader මඟින් සමහරවිට data array එකක් හෝ object එකක් දෙන්න පුළුවන්
+    return res?.data || res || null;
   } catch (e) {
     console.error('Social API error:', e.message);
   }
@@ -40,17 +49,22 @@ async function getSocialLinks(platform, url) {
 }
 
 function pickQuality(info, quality) {
-  if (quality === 'hd') return info.hd || info.HD || info.high || info.nowm || info.sd || info.SD || info.low;
-  if (quality === 'sd') return info.sd || info.SD || info.low || info.nowm || info.hd || info.HD || info.high;
-  if (quality === 'wm') return info.wm;
-  return null;
+  // Array එකක් හෝ object එකක් ආවොත් handle කිරීමට
+  const data = Array.isArray(info) ? info[0] : info;
+  if (!data) return null;
+
+  // විවිධ format වලට links ගන්න හැටි
+  if (quality === 'hd') return data.hd || data.HD || data.high || data.url || data.nowm;
+  if (quality === 'sd') return data.sd || data.SD || data.low || data.url || data.nowm;
+  if (quality === 'wm') return data.wm || data.watermark;
+  return data.url || data.hd || data.sd || null;
 }
 
 async function searchMyAPI(movieName) {
   try {
     const res = await fetch(MY_API_URL);
     const data = await res.json();
-    const movies = Array.isArray(data)? data : data.movies || data.data || [];
+    const movies = Array.isArray(data) ? data : data.movies || data.data || [];
     return movies.find(m => (m.title || m.name || '').toLowerCase().includes(movieName.toLowerCase()));
   } catch (e) {
     console.error('My API error:', e.message);
@@ -58,7 +72,7 @@ async function searchMyAPI(movieName) {
   }
 }
 
-// ================= START - FIXED (No Markdown Error) =================
+// ================= START =================
 bot.start(async (ctx) => {
   const userName = ctx.from.first_name || 'User';
   const now = new Date();
@@ -89,7 +103,6 @@ bot.start(async (ctx) => {
     if (fs.existsSync(ALIVE_LOCAL_PATH)) {
       await ctx.replyWithPhoto({ source: fs.createReadStream(ALIVE_LOCAL_PATH) }, {
         caption: caption,
-        // parse_mode අයින් කලා - එතකොට fancy font නිසා error එන්නේ නෑ
         reply_markup: {
           inline_keyboard: [
             [{ text: '🎬 Search Movie', switch_inline_query_current_chat: '' }],
@@ -123,16 +136,22 @@ bot.on('text', async (ctx) => {
     setTimeout(() => socialCache.delete(id), 600000);
 
     const row = [];
-    if (info.sd || info.SD || info.low) row.push({ text: '360p SD', callback_data: `dl_${id}_sd` });
-    if (info.hd || info.HD || info.high || info.nowm) row.push({ text: '720p HD', callback_data: `dl_${id}_hd` });
-    if (info.wm) row.push({ text: 'Watermark', callback_data: `dl_${id}_wm` });
-    if (row.length === 0) row.push({ text: '📥 Download', callback_data: `dl_${id}_hd` });
+    row.push({ text: '📥 Download Video', callback_data: `dl_${id}_hd` });
 
-    const thumb = info.thumb? info.thumb : { source: fs.createReadStream(ALIVE_LOCAL_PATH) };
-    await ctx.replyWithPhoto(thumb, {
-      caption: `🎬 ${info.title || platform.toUpperCase()} \nQuality එකක් තෝරන්න 👇`,
+    const thumb = info.thumb || info.thumbnail || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
+    
+    const replyOptions = {
+      caption: `🎬 ${platform.toUpperCase()} Video එක සූදානම්!\nQuality එකක් තෝරන්න 👇`,
       reply_markup: { inline_keyboard: [row] }
-    });
+    };
+
+    if (thumb && typeof thumb === 'string') {
+      await ctx.replyWithPhoto(thumb, replyOptions);
+    } else if (thumb) {
+      await ctx.replyWithPhoto(thumb, replyOptions);
+    } else {
+      await ctx.reply(replyOptions.caption, replyOptions.reply_markup);
+    }
     return;
   }
 
@@ -143,16 +162,16 @@ bot.on('text', async (ctx) => {
     const omdb = await omdbRes.json();
     const myMovie = await searchMyAPI(query);
 
-    if (omdb.Response === 'False' &&!myMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
+    if (omdb.Response === 'False' && !myMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
 
     const title = omdb.Title || myMovie?.title || query;
-    const poster = omdb.Poster && omdb.Poster!== 'N/A'? omdb.Poster : null;
+    const poster = omdb.Poster && omdb.Poster !== 'N/A' ? omdb.Poster : null;
 
     const movieId = createId();
     movieCache.set(movieId, { query, title, myMovie, omdb });
     setTimeout(() => movieCache.delete(movieId), 600000);
 
-    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH)? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : 'https://via.placeholder.com/300x450?text=No+Poster');
+    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : 'https://via.placeholder.com/300x450?text=No+Poster');
 
     await ctx.replyWithPhoto(photoSource, {
       caption: `🎬 ${title}\nQuality එකක් තෝරන්න 👇`,
@@ -181,8 +200,14 @@ bot.on('callback_query', async (ctx) => {
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     const link = pickQuality(cached.info, quality);
     if (!link) return ctx.reply('❌ මේ Quality එක නෑ.');
-    await ctx.reply(`✅ ${cached.platform.toUpperCase()} - ${quality.toUpperCase()} Ready!`, {
-      reply_markup: { inline_keyboard: [[{ text: '📥 Download', url: link }], [{ text: '▶️ Watch in Telegram', callback_data: `send_${id}_${quality}` }]] }
+    
+    await ctx.reply(`✅ ${cached.platform.toUpperCase()} Download Link Ready!`, {
+      reply_markup: { 
+        inline_keyboard: [
+          [{ text: '📥 Download', url: link }], 
+          [{ text: '▶️ Watch in Telegram', callback_data: `send_${id}_${quality}` }]
+        ] 
+      }
     });
     return;
   }
@@ -194,9 +219,9 @@ bot.on('callback_query', async (ctx) => {
     if (!cached) return ctx.reply('⌛ Session expired.');
     const link = pickQuality(cached.info, quality);
     try {
-      await ctx.replyWithVideo(link, { caption: `✅ ${cached.platform.toUpperCase()} ${quality.toUpperCase()}` });
+      await ctx.replyWithVideo(link, { caption: `✅ ${cached.platform.toUpperCase()} Video` });
     } catch (e) {
-      ctx.reply('❌ Upload වුනේ නෑ. File එක ලොකු වැඩි. Download button එකෙන් ගන්න.');
+      ctx.reply('❌ Upload වුනේ නෑ. File එක ලොකු වැඩි හෝ Telegram මඟින් direct stream කරන්න බැහැ. Download button එකෙන් ගන්න.');
     }
     return;
   }
