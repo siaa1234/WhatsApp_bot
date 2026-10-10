@@ -5,7 +5,6 @@ const { ttdl, igdl, fbdown } = require('btch-downloader');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
-// ඔබ ලබා දුන් නිල YouTube Data API Key එක මෙහි ඇතුළත් කර ඇත
 const YOUTUBE_API_KEY = 'AIzaSyBmo2_cfffiJvts4fXtDnDLuqqINY7cTP0';
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, 'alive.jpg');
@@ -47,13 +46,11 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
-// YouTube URL එකකින් Video ID එක වෙන් කර ගැනීම
 function extractYouTubeId(url) {
   const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
   return match ? match[1] : null;
 }
 
-// YouTube Data API v3 මඟින් නිවැරදි Video Metadata ලබා ගැනීම
 async function getYouTubeMetadata(url) {
   try {
     const videoId = extractYouTubeId(url);
@@ -186,7 +183,6 @@ bot.on('text', async (ctx) => {
     const id = createId();
 
     if (platform === 'youtube') {
-      // YouTube සඳහා නිල YouTube API v3 භාවිතා කිරීම
       const ytInfo = await getYouTubeMetadata(query);
       if (!ytInfo) return ctx.reply('❌ YouTube video විස්තර ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
 
@@ -228,7 +224,6 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // TikTok, Instagram, Facebook සඳහා
     const info = await getSocialLinks(platform, query);
     if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
 
@@ -282,7 +277,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // 2. DIRECT LINK / GOOGLE DRIVE LINK
   const directType = detectDirectLink(query);
   if (directType) {
     let finalUrl = query;
@@ -304,7 +298,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // 3. MOVIE SEARCH
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try {
     const omdbRes = await fetch(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
@@ -342,7 +335,6 @@ bot.on('text', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
-  // Social / YouTube Video Send Handler
   if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Video එක සකසමින් පවතී...');
     const parts = data.split('_');
@@ -353,7 +345,7 @@ bot.on('callback_query', async (ctx) => {
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
     if (cached.platform === 'youtube') {
-      await ctx.reply(`ℹ️ YouTube වීඩියෝ ඩවුන්ලෝඩ් කිරීම සඳහා ඔබ වෙනත් සුදුසු stream downloader එකක් හෝ API එකක් (උදා: cobalt.tools API) භාවිතා කළ යුතුය. YouTube Data API මඟින් වීඩියෝ විස්තර සහ දත්ත පමණක් ලබාගත හැක.`);
+      await ctx.reply(`ℹ️ YouTube වීඩියෝ ඩවුන්ලෝඩ් කිරීම සඳහා cobalt.tools වැනි API එකක් හෝ ytdl-core භාවිතා කළ යුතුය. YouTube Data API මඟින් වීඩියෝ විස්තර සහ දත්ත පමණක් ලබාගත හැක.`);
       return;
     }
 
@@ -386,7 +378,6 @@ bot.on('callback_query', async (ctx) => {
     return;
   }
 
-  // Direct Link / GDrive Video Send Handler
   if (data.startsWith('send_')) {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const id = data.split('_')[1];
@@ -394,7 +385,7 @@ bot.on('callback_query', async (ctx) => {
     const cached = directCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
     
-    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී (මෙයට ටික වේලාවක් ගත විය හැක)...`);
+    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී...`);
 
     try {
       const response = await fetch(cached.url);
@@ -408,7 +399,7 @@ bot.on('callback_query', async (ctx) => {
         { caption: `✅ Successfully Downloaded & Uploaded!` }
       );
       
-      try { await ctx.telegram.deleteName ? await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id) : null; } catch(e) {}
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
     } catch (e) {
       console.error('Video upload error:', e.message);
       try {
@@ -421,7 +412,6 @@ bot.on('callback_query', async (ctx) => {
     return;
   }
 
-  // Movie Search Handler
   if (data.startsWith('mq_')) {
     await ctx.answerCbQuery();
     const parts = data.split('_');
@@ -429,10 +419,10 @@ bot.on('callback_query', async (ctx) => {
     const quality = parts[2];
     const cached = movieCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Film නම ආයෙ එවන්න.');
-    await ctx.reply(`⏳ ${cached.title} -${quality} ලෝඩ් කරනවා...`);
+    await ctx.reply(`⏳ ${cached.title} - ${quality} ලෝඩ් කරනවා...`);
     const fileLink = cached.myMovie?.[quality] || cached.myMovie?.links?.[quality] || cached.myMovie?.downloadUrl || cached.myMovie?.url;
     if (fileLink) {
-      await ctx.reply(`✅ ${cached.title} - `${quality} Ready!\n\n🔗 ${fileLink}`, {
+      await ctx.reply(`✅ ${cached.title} - ${quality} Ready!\n\n🔗 ${fileLink}`, {
         reply_markup: { inline_keyboard: [[{ text: `📥 Download ${quality}`, url: fileLink }]] }
       });
     } else {
