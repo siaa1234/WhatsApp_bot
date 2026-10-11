@@ -1,13 +1,10 @@
-name: Run Telegram Bot
+name: Telegram Bot
 
 on:
-  workflow_dispatch:        # Actions tab එකෙන් manual start කරන්න
-  push:
-    branches: [main]
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'   # පැය 6කට වරක් auto restart (job limit එක 6h නිසා)
+    - cron: '0 */5 * * *'
 
-# Bot instance එකක් විතරක් run වෙන්න (නැත්නම් Telegram 409 Conflict error එනවා)
 concurrency:
   group: telegram-bot
   cancel-in-progress: true
@@ -15,8 +12,7 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
-
+    timeout-minutes: 350
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,29 +20,31 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - name: Install ffmpeg
+      - name: Debug - Show files
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          pwd
+          ls -la
+          echo "--- checking alive.jpg ---"
+          ls -lh alive.jpg || echo "❌ alive.jpg not found in root!"
 
       - name: Install dependencies
-        run: npm install
-
-      - name: Create YouTube cookies file (optional)
-        env:
-          YT_COOKIES: ${{ secrets.YT_COOKIES }}
         run: |
-          if [ -n "$YT_COOKIES" ]; then
-            printf '%s\n' "$YT_COOKIES" > cookies.txt
-            echo "cookies.txt created"
+          if [ -f package.json ]; then
+            npm install
           else
-            echo "YT_COOKIES secret not set, skipping"
+            npm install telegraf btch-downloader
           fi
 
-      - name: Start bot
+      - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OMDB_API: ${{ secrets.OMDB_API }}
-        run: node index.js
+        run: |
+          if [ -f index.js ]; then
+            node index.js
+          else
+            echo "❌ index.js එක repo එකේ හම්බුනේ නෑ!"
+            exit 1
+          fi
