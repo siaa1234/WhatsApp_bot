@@ -9,7 +9,7 @@ const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = requi
 const P = require('pino');
 
 const web = express();
-web.get('/', (req, res) => res.send('Cinemax Bot Alive ✅'));
+web.get('/', (req, res) => res.send('Cinemax Bot Alive ✅ v8.1 Fix'));
 web.listen(process.env.PORT || 8000, () => console.log('Web server started'));
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -27,16 +27,18 @@ const directCache = new Map();
 const movieCache = new Map();
 function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
-// ============ WHATSAPP FIX FOR GITHUB ACTIONS ============
+// ============ WHATSAPP FIX FOR GITHUB ACTIONS - NO CUT ============
 let waSocket = null;
 async function startWhatsApp() {
   try {
-    // 1. GitHub Secret එකෙන් Session එක Restore කරනවා
     if(process.env.WA_SESSION){
       if(!fs.existsSync('wa_auth')) fs.mkdirSync('wa_auth', {recursive:true});
-      const sessJson = Buffer.from(process.env.WA_SESSION, 'base64').toString();
-      fs.writeFileSync('wa_auth/creds.json', sessJson);
-      console.log('✅ WA Session Restored from Secret!');
+      try{
+        const cleanB64 = process.env.WA_SESSION.replace(/\s/g,'');
+        const sessJson = Buffer.from(cleanB64, 'base64').toString();
+        fs.writeFileSync('wa_auth/creds.json', sessJson);
+        console.log('✅ WA Session Restored from Secret!');
+      }catch(e){ console.log('Session restore fail', e.message)}
     }
 
     const { state, saveCreds } = await useMultiFileAuthState('wa_auth');
@@ -50,14 +52,16 @@ async function startWhatsApp() {
 
     waSocket.ev.on('creds.update', async () => {
       await saveCreds();
-      // 2. අලුත් Session එක Print කරනවා
       try{
         if(fs.existsSync('wa_auth/creds.json')){
           const data = fs.readFileSync('wa_auth/creds.json', 'utf8');
           const b64 = Buffer.from(data).toString('base64');
-          console.log('\n\n==== COPY THIS SECRET (WA_SESSION) ====');
-          console.log(b64);
-          console.log('========================================\n\n');
+          console.log('\n\n==== COPY THIS SECRET (WA_SESSION) PARTS ====');
+          const chunkSize = 800;
+          for(let i=0; i<b64.length; i+=chunkSize){
+            console.log(`PART_${Math.floor(i/chunkSize)}:${b64.substring(i, i+chunkSize)}`);
+          }
+          console.log('==== END OF SECRET - JOIN ALL PARTS ====\n\n');
         }
       }catch(e){}
     });
@@ -121,7 +125,7 @@ async function searchMyAPI(movieName) {
 
 bot.start(async (ctx) => {
   const userName = ctx.from.first_name || 'User'; const now = new Date(); const date = now.toLocaleDateString('en-GB'); const time = now.toLocaleTimeString('en-GB', { hour12: false });
-  const caption = `👋 HI, ${userName} I AM Active NOW 👾\n\n📅 Date: ${date}\n⏰ Time: ${time}\n\n🧬 Version: 8.0.0 GitHub Fix\n\n*WhatsApp Pair:*\n\`pair 9471xxxxxxx\``;
+  const caption = `👋 HI, ${userName} I AM Active NOW 👾\n\n📅 Date: ${date}\n⏰ Time: ${time}\n\n🧬 Version: 8.1 GitHub Fix\n\n*WhatsApp Pair:*\n\`pair 9471xxxxxxx\``;
   await ctx.reply(caption, { parse_mode: 'Markdown' });
 });
 
@@ -212,5 +216,5 @@ bot.on('callback_query', async (ctx) => {
   }
 });
 
-bot.launch().then(() => console.log('Bot Started ✅ v8 GitHub Fix'));
+bot.launch().then(() => console.log('Bot Started ✅ v8.1 No-Cut Fix'));
 process.once('SIGINT', () => bot.stop('SIGINT')); process.once('SIGTERM', () => bot.stop('SIGTERM'));
