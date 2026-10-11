@@ -32,37 +32,59 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
-// Cobalt API හරහා දත්ත ලබා ගැනීම (Instagram, TikTok, Facebook, YouTube සියල්ල සඳහා)
-async function getCobaltData(url) {
+// Multi-API Fetcher (SnapSave, Rapid/Public Downloader, Cobalt Fallback)
+async function fetchSocialMediaVideo(url, platform) {
+  // Method 1: SnapSave/SaveFrom Universal API
   try {
-    const res = await fetch('https://api.cobalt.tools/api/json', {
+    const res1 = await fetch(`https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`);
+    const data1 = await res1.json();
+    if (data1 && (data1.video || data1.url)) {
+      return {
+        url: data1.video?.noWatermark || data1.video || data1.url,
+        title: data1.title || `${platform} Video`,
+        thumb: data1.cover || data1.thumbnail || null
+      };
+    }
+  } catch (e) {}
+
+  // Method 2: Public Auto-Downloader API
+  try {
+    const res2 = await fetch(`https://api.vkrdown.com/api/download?url=${encodeURIComponent(url)}`);
+    const data2 = await res2.json();
+    if (data2 && data2.data && data2.data.length > 0) {
+      const bestVideo = data2.data.find(v => v.type === 'video' || v.format === 'mp4') || data2.data[0];
+      return {
+        url: bestVideo.url,
+        title: data2.title || `${platform} Video`,
+        thumb: data2.thumbnail || null
+      };
+    }
+  } catch (e) {}
+
+  // Method 3: Public Cobalt alternative mirror
+  try {
+    const res3 = await fetch('https://cobalt-api.kwiatek.xyz/', {
       method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0'
-      },
-      body: JSON.stringify({
-        url: url,
-        vCodec: 'h264',
-        vQuality: '720',
-        filenamePattern: 'classic'
-      })
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, videoQuality: '720' })
     });
-    const data = await res.json();
-    if (!data || data.status === 'error') return null;
-    return data;
-  } catch (e) {
-    console.error('Cobalt Error:', e.message);
-    return null;
-  }
+    const data3 = await res3.json();
+    if (data3 && data3.url) {
+      return {
+        url: data3.url,
+        title: `${platform} Video`,
+        thumb: data3.thumbnail || null
+      };
+    }
+  } catch (e) {}
+
+  return null;
 }
 
-function buildCaption(platform, data) {
+function buildCaption(platform, title) {
   const pName = platform.toUpperCase();
-  const title = (data.title || 'No Title').toString().replace(/_/g, ' ').slice(0, 80);
-  const author = data.author || 'Cinemax User';
-  return `🟨🟥 ${pName} DOWNLOADER 🟥🟨\n\n🟡 Title: ${title}\n🔴 Author: ${author}\n\n⬇️ DOWNLOAD OPTIONS\n\n🔥 Direct Download Ready\n\n| 🌐 Web Site: cinemaxlk.vercel.app\n❤️💛 POWERED BY CINEMAX 💛❤️`;
+  const cleanTitle = (title || 'No Title').toString().replace(/_/g, ' ').slice(0, 80);
+  return `🟨🟥 ${pName} DOWNLOADER 🟥🟨\n\n🟡 Title: ${cleanTitle}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!\n\n| 🌐 Web Site: cinemaxlk.vercel.app\n❤️💛 POWERED BY CINEMAX 💛❤️`;
 }
 
 async function searchMyAPI(movieName) {
@@ -80,48 +102,32 @@ async function handleText(ctx) {
 
   const platform = detectPlatform(query);
   if (platform) {
-    await ctx.reply(`🔍 ${platform.toUpperCase()} video එක analyze කරනවා...`);
+    const statusMsg = await ctx.reply(`🔍 ${platform.toUpperCase()} වීඩියෝ එක Download කිරීමට සූදානම් කරනවා...`);
     const id = createId();
 
-    // Cobalt API මඟින් දත්ත ලබා ගැනීම
-    const cobaltData = await getCobaltData(query);
+    const videoData = await fetchSocialMediaVideo(query, platform);
 
-    if (cobaltData && (cobaltData.url || cobaltData.picker)) {
-      let videoUrls = [];
-      
-      // Picker එකක් තිබේ නම් (multiple items / images / videos)
-      if (cobaltData.picker && cobaltData.picker.length > 0) {
-        videoUrls = cobaltData.picker.map(p => p.url);
-      } else if (cobaltData.url) {
-        videoUrls.push(cobaltData.url);
-      }
-
-      let thumb = cobaltData.thumbnail || null;
-      let title = cobaltData.filename || `${platform} Video`;
-
-      const extracted = { title: title, author: `${platform} Creator`, thumb: thumb, links: videoUrls };
-
-      socialCache.set(id, { platform, url: query, info: extracted, raw: cobaltData });
+    if (videoData && videoData.url) {
+      socialCache.set(id, { platform, videoUrl: videoData.url });
       setTimeout(() => socialCache.delete(id), 600000);
 
-      const captionText = buildCaption(platform, extracted);
-      const keyboard = [
-        [{ text: '📥 Download Video', callback_data: `soc_${id}_dl` }]
-      ];
+      const captionText = buildCaption(platform, videoData.title);
+      const keyboard = [[{ text: '📥 Video එක ලබාගන්න (Get Video)', callback_data: `soc_${id}_get` }]];
 
-      if (thumb) {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+
+      if (videoData.thumb) {
         try { 
-          await ctx.replyWithPhoto(thumb, { caption: captionText, reply_markup: { inline_keyboard: keyboard } }); 
+          await ctx.replyWithPhoto(videoData.thumb, { caption: captionText, reply_markup: { inline_keyboard: keyboard } }); 
           return; 
-        } catch (e) { 
-          console.log('thumb fail, sending text'); 
-        }
+        } catch (e) {}
       }
       await ctx.reply(captionText, { reply_markup: { inline_keyboard: keyboard } });
       return;
+    } else {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+      return ctx.reply('❌ වීඩියෝ එක හොයාගන්න බැරි වුණා. Link එක Public එකක්ද හෝ නිවැරදිද කියා පරීක්ෂා කරන්න.');
     }
-
-    return ctx.reply('❌ Video එක ලබා ගැනීමට නොහැකි විය. Link එක సరවැසි (Valid) එකක් සහ Public ද කියා පරීක්ෂා කරන්න.');
   }
 
   const directType = detectDirectLink(query);
@@ -167,35 +173,25 @@ async function handleCallback(ctx) {
   const data = ctx.callbackQuery.data;
   
   if (data.startsWith('soc_')) {
-    await ctx.answerCbQuery('⏳ Downloading...');
-    const parts = data.split('_'); 
-    const id = parts[1];
+    await ctx.answerCbQuery('⏳ Downloading Video...');
+    const id = data.split('_')[1];
     const cached = socialCache.get(id); 
-    if (!cached) return ctx.reply('⌛ Expired. කරුණාකර නැවත Link එක එවන්න.');
+    if (!cached) return ctx.reply('⌛ Expired! නැවත Link එක එවන්න.');
     
-    const statusMsg = await ctx.reply(`⏳ Uploading video...`);
+    const statusMsg = await ctx.reply(`⏳ Telegram එකට Upload වෙනවා...`);
     try {
-      const links = cached.info.links;
-      if (!links || links.length === 0) {
-        await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(()=>{});
-        return ctx.reply('❌ Download link එක ලබා ගැනීමට නොහැකි විය.');
-      }
-
-      // සියලුම links (లేదా පළමු link එක) එකින් එක හෝ එකක් ලෙස යැවීම
-      for (let link of links) {
-        try { 
-          await ctx.replyWithVideo(link, { caption: `✅ Done! POWERED BY CINEMAX` }); 
-        } catch (err) { 
-          const res = await fetch(link); 
-          const buf = Buffer.from(await res.arrayBuffer()); 
-          await ctx.replyWithVideo({ source: buf, filename: 'video.mp4' }, { caption: `✅ Done! POWERED BY CINEMAX` }); 
-        }
-      }
-      
+      await ctx.replyWithVideo(cached.videoUrl, { caption: `✅ Done! POWERED BY CINEMAX` });
       await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(()=>{});
-    } catch (e) { 
-      await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(()=>{}); 
-      ctx.reply('❌ Video එක යැවීමට නොහැකි විය. (File size එක වැඩි වැඩිදැයි පරීක්ෂා කරන්න)'); 
+    } catch (e) {
+      try {
+        // Direct link send failed නම් stream එකෙන් යවනවා
+        const res = await fetch(cached.videoUrl);
+        const buf = Buffer.from(await res.arrayBuffer());
+        await ctx.replyWithVideo({ source: buf, filename: 'video.mp4' }, { caption: `✅ Done! POWERED BY CINEMAX` });
+      } catch (err) {
+        ctx.reply('❌ Video Upload කිරීම අසාර්ථක විය. (File එක විශාල වැඩි විය හැක)');
+      }
+      await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(()=>{});
     } 
     return;
   }
