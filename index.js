@@ -1,16 +1,21 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { Telegraf } = require('telegraf');
 const { ttdl, igdl, fbdown } = require('btch-downloader');
+const youtubedl = require('youtube-dl-exec');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const OMDB_API = process.env.OMDB_API || 'c011220a';
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, 'alive.jpg');
+// IP block වුණොත් browser එකෙන් export කරපු cookies.txt මෙතනට දාන්න
+const COOKIES_PATH = path.join(__dirname, 'cookies.txt');
 
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
 
-const bot = new Telegraf(BOT_TOKEN);
+// Download/upload වලට වෙලාව යන නිසා handler timeout අයින් කරනවා
+const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: Infinity });
 
 // ================= CACHE =================
 const socialCache = new Map();
@@ -45,25 +50,46 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
-// Cobalt API මඟින් YouTube වීඩියෝව සහ එහි විස්තර ලබා ගැනීම
-async function getCobaltData(url) {
-  try {
-    const res = await fetch('https://api.cobalt.tools/api/json', {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ url: url })
-    });
-    const data = await res.json();
-    return data;
-  } catch (e) {
-    console.error('Cobalt API error:', e.message);
-  }
-  return null;
+const escapeHtml = (s = '') =>
+  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function ytExtraOpts() {
+  return fs.existsSync(COOKIES_PATH) ? { cookies: COOKIES_PATH } : {};
 }
 
+// ---------- YouTube (yt-dlp) ----------
+async function getYouTubeInfo(url) {
+  try {
+    return await youtubedl(url, {
+      dumpSingleJson: true,
+      noWarnings: true,
+      noPlaylist: true,
+      noCheckCertificates: true,
+      ...ytExtraOpts(),
+    });
+  } catch (e) {
+    console.error('YT info error:', e.message);
+    return null;
+  }
+}
+
+async function downloadYouTube(url, quality) {
+  const base = `yt_${createId()}`;
+  await youtubedl(url, {
+    format: `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/b[height<=${quality}]/b`,
+    mergeOutputFormat: 'mp4',
+    output: path.join(os.tmpdir(), `${base}.%(ext)s`),
+    noPlaylist: true,
+    noWarnings: true,
+    noCheckCertificates: true,
+    ...ytExtraOpts(),
+  });
+  const file = fs.readdirSync(os.tmpdir()).find(f => f.startsWith(base));
+  if (!file) throw new Error('Downloaded file not found');
+  return path.join(os.tmpdir(), file);
+}
+
+// ---------- TikTok / Instagram / Facebook ----------
 async function getSocialLinks(platform, url) {
   try {
     let res;
@@ -169,13 +195,18 @@ bot.on('text', async (ctx) => {
 
     const id = createId();
 
+    // ---------- YouTube ----------
     if (platform === 'youtube') {
-      const ytData = await getCobaltData(query);
-      if (!ytData || !ytData.url && !ytData.picker) {
+      const yt = await getYouTubeInfo(query);
+      if (!yt) {
         return ctx.reply('❌ YouTube video එක ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
       }
 
-      socialCache.set(id, { platform: 'youtube', url: query, info: ytData });
+      socialCache.set(id, {
+        platform: 'youtube',
+        url: query,
+        info: { title: yt.title, uploader: yt.uploader || yt.channel }
+      });
       setTimeout(() => socialCache.delete(id), 600000);
 
       const keyboard = [
@@ -190,26 +221,33 @@ bot.on('text', async (ctx) => {
         ]
       ];
 
-      const title = ytData.filename || 'YouTube Video';
-      const captionText = `🎬 **${title}**\n\n` +
-                          `👇 අවශ්‍ය Quality එක තෝරන්න:`;
+      const mins = yt.duration
+        ? `${Math.floor(yt.duration / 60)}:${String(yt.duration % 60).padStart(2, '0')}`
+        : 'N/A';
+      const captionText =
+        `🎬 <b>${escapeHtml(yt.title)}</b>\n\n` +
+        `👤 <b>Channel:</b> ${escapeHtml(yt.uploader || yt.channel)}\n` +
+        `👁️ <b>Views:</b> ${yt.view_count ?? 'N/A'}\n` +
+        `⏱️ <b>Duration:</b> ${mins}\n\n` +
+        `👇 අවශ්‍ය Quality එක තෝරන්න:`;
 
-      const replyOptions = {
+      const opts = {
         caption: captionText,
-        parse_mode: 'Markdown',
+        parse_mode: 'HTML',
         reply_markup: { inline_keyboard: keyboard }
       };
 
-      if (ytData.thumbnail) {
-        try {
-          await ctx.replyWithPhoto(ytData.thumbnail, replyOptions);
-          return;
-        } catch (err) {}
+      if (yt.thumbnail) {
+        try { await ctx.replyWithPhoto(yt.thumbnail, opts); return; } catch (err) {}
       }
-      await ctx.reply(captionText, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+      await ctx.reply(captionText, {
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: keyboard }
+      });
       return;
     }
 
+    // ---------- TikTok / Instagram / Facebook ----------
     const info = await getSocialLinks(platform, query);
     if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
 
@@ -232,37 +270,38 @@ bot.on('text', async (ctx) => {
       ]
     ];
 
-    const thumb = item?.thumb || item?.thumbnail || info.thumb || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
-    
-    const captionText = `🎬 **${title}**\n\n` +
-                        `👤 **Page/Creator:** ${author}\n` +
-                        `👁️ **Views:** ${views}\n` +
-                        `📅 **Release Date:** ${date}\n` +
-                        `💬 **Comments:** ${comments}\n\n` +
-                        `👇 අවශ්‍ය Quality එක තෝරන්න:`;
+    const thumb = item?.thumb || item?.thumbnail || info.thumb ||
+      (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : null);
+
+    const captionText =
+      `🎬 <b>${escapeHtml(title)}</b>\n\n` +
+      `👤 <b>Page/Creator:</b> ${escapeHtml(author)}\n` +
+      `👁️ <b>Views:</b> ${escapeHtml(views)}\n` +
+      `📅 <b>Release Date:</b> ${escapeHtml(date)}\n` +
+      `💬 <b>Comments:</b> ${escapeHtml(comments)}\n\n` +
+      `👇 අවශ්‍ය Quality එක තෝරන්න:`;
 
     const replyOptions = {
       caption: captionText,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
       reply_markup: { inline_keyboard: keyboard }
     };
 
-    if (thumb && typeof thumb === 'string') {
-      try {
-        await ctx.replyWithPhoto(thumb, replyOptions);
-        return;
-      } catch (err) {}
-    } else if (thumb) {
+    if (thumb) {
       try {
         await ctx.replyWithPhoto(thumb, replyOptions);
         return;
       } catch (err) {}
     }
-    
-    await ctx.reply(captionText, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+
+    await ctx.reply(captionText, {
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboard }
+    });
     return;
   }
 
+  // ---------- Direct links ----------
   const directType = detectDirectLink(query);
   if (directType) {
     let finalUrl = query;
@@ -284,6 +323,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
+  // ---------- Movie search ----------
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try {
     const omdbRes = await fetch(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
@@ -299,7 +339,10 @@ bot.on('text', async (ctx) => {
     movieCache.set(movieId, { query, title, myMovie, omdb });
     setTimeout(() => movieCache.delete(movieId), 600000);
 
-    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH) ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) } : 'https://via.placeholder.com/300x450?text=No+Poster');
+    const photoSource = poster ||
+      (fs.existsSync(ALIVE_LOCAL_PATH)
+        ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) }
+        : 'https://via.placeholder.com/300x450?text=No+Poster');
 
     await ctx.replyWithPhoto(photoSource, {
       caption: `🎬 ${title}\nQuality එකක් තෝරන්න 👇`,
@@ -321,104 +364,118 @@ bot.on('text', async (ctx) => {
 bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
 
+  // ---------- Social / YouTube download ----------
   if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
-    const parts = data.split('_');
-    const id = parts[1];
-    const quality = parts[2];
-    
+    const [, id, quality] = data.split('_');
+
     const cached = socialCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
-    
-    let link = null;
-    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී...`);
 
-    try {
-      if (cached.platform === 'youtube') {
-        // අදාළ quality එකට cobalt හරහා නැවත fetch කිරීම
-        const freshData = await getCobaltData(cached.url);
-        link = freshData?.url || freshData?.picker?.[0]?.url;
-      } else {
-        link = pickSocialQuality(cached.info, quality);
-      }
+    const statusMsg = await ctx.reply('⏳ Video එක Download කරමින් පවතී...');
+    const deleteStatus = () =>
+      ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
-      if (!link) {
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
-        return ctx.reply('❌ මේ Quality එකට අදාළ direct download link එක ලබාගත නොහැක.');
-      }
-
-      const response = await fetch(link);
-      if (!response.ok) throw new Error('Failed to fetch video stream');
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
-      await ctx.replyWithVideo(
-        { source: buffer, filename: `video.mp4` }, 
-        { caption: `✅ Successfully Downloaded & Uploaded! (${quality}p)` }
-      );
-      
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
-    } catch (e) {
-      console.error('Video upload error:', e.message);
+    // ----- YouTube -----
+    if (cached.platform === 'youtube') {
+      let filePath;
       try {
-        if (link) {
-          await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded! (${quality}p)` });
-        } else {
-          throw new Error('No link available');
+        filePath = await downloadYouTube(cached.url, quality);
+        const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
+
+        if (sizeMB > 49) {
+          await deleteStatus();
+          return ctx.reply(`❌ File එක ${sizeMB.toFixed(1)}MB. Telegram bot limit එක 50MB. අඩු quality එකක් තෝරන්න.`);
         }
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+
+        await ctx.replyWithVideo(
+          { source: fs.createReadStream(filePath), filename: 'video.mp4' },
+          { caption: `✅ ${cached.info.title} (${quality}p)`, supports_streaming: true }
+        );
+        await deleteStatus();
+      } catch (e) {
+        console.error('YT download error:', e.message);
+        await deleteStatus();
+        ctx.reply('❌ Download කිරීම අසාර්ථකයි. පසුව උත්සාහ කරන්න.');
+      } finally {
+        if (filePath) fs.unlink(filePath, () => {});
+      }
+      return;
+    }
+
+    // ----- TikTok / Instagram / Facebook -----
+    const link = pickSocialQuality(cached.info, quality);
+    try {
+      if (!link) throw new Error('No link');
+      await ctx.replyWithVideo(link, { caption: `✅ Successfully Uploaded! (${quality.toUpperCase()})` });
+    } catch (e) {
+      try {
+        if (!link) throw new Error('No link');
+        const response = await fetch(link);
+        if (!response.ok) throw new Error('fetch failed');
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await ctx.replyWithVideo(
+          { source: buffer, filename: 'video.mp4' },
+          { caption: '✅ Successfully Uploaded!' }
+        );
       } catch (err) {
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
-        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක විශාල වැඩි විය හැක.');
+        await ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක විශාල වැඩි විය හැක.');
       }
     }
+    await deleteStatus();
     return;
   }
 
+  // ---------- Direct link send ----------
   if (data.startsWith('send_')) {
     await ctx.answerCbQuery('⏳ Video එක Download කරමින් පවතී...');
     const id = data.split('_')[1];
-    
+
     const cached = directCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Link එක ආයෙ එවන්න.');
-    
-    const statusMsg = await ctx.reply(`⏳ Video එක Telegram වෙත upload කරමින් පවතී...`);
+
+    const statusMsg = await ctx.reply('⏳ Video එක Telegram වෙත upload කරමින් පවතී...');
+    const deleteStatus = () =>
+      ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
     try {
       const response = await fetch(cached.url);
       if (!response.ok) throw new Error('Failed to fetch video stream from URL');
-      
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
+
+      const buffer = Buffer.from(await response.arrayBuffer());
 
       await ctx.replyWithVideo(
-        { source: buffer, filename: `video.mp4` }, 
-        { caption: `✅ Successfully Downloaded & Uploaded!` }
+        { source: buffer, filename: 'video.mp4' },
+        { caption: '✅ Successfully Downloaded & Uploaded!' }
       );
-      
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+      await deleteStatus();
     } catch (e) {
       console.error('Video upload error:', e.message);
       try {
-        await ctx.replyWithVideo(cached.url, { caption: `✅ Successfully Uploaded!` });
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+        await ctx.replyWithVideo(cached.url, { caption: '✅ Successfully Uploaded!' });
+        await deleteStatus();
       } catch (err) {
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
-        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක 4GB වඩා වැඩි වීමට හෝ direct video format එකක් නොවීමට ඉඩ ඇත.');
+        await deleteStatus();
+        ctx.reply('❌ Video එක upload කිරීම අසාර්ථකයි. File එක 50MB වඩා වැඩි වීමට හෝ direct video format එකක් නොවීමට ඉඩ ඇත.');
       }
     }
     return;
   }
 
+  // ---------- Movie quality ----------
   if (data.startsWith('mq_')) {
     await ctx.answerCbQuery();
-    const parts = data.split('_');
-    const id = parts[1];
-    const quality = parts[2];
+    const [, id, quality] = data.split('_');
     const cached = movieCache.get(id);
     if (!cached) return ctx.reply('⌛ Session expired. Film නම ආයෙ එවන්න.');
+
     await ctx.reply(`⏳ ${cached.title} - ${quality} ලෝඩ් කරනවා...`);
-    const fileLink = cached.myMovie?.[quality] || cached.myMovie?.links?.[quality] || cached.myMovie?.downloadUrl || cached.myMovie?.url;
+    const fileLink =
+      cached.myMovie?.[quality] ||
+      cached.myMovie?.links?.[quality] ||
+      cached.myMovie?.downloadUrl ||
+      cached.myMovie?.url;
+
     if (fileLink) {
       await ctx.reply(`✅ ${cached.title} - ${quality} Ready!\n\n🔗 ${fileLink}`, {
         reply_markup: { inline_keyboard: [[{ text: `📥 Download ${quality}`, url: fileLink }]] }
