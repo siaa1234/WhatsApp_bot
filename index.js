@@ -27,21 +27,50 @@ const directCache = new Map();
 const movieCache = new Map();
 function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
-// ============ WHATSAPP PAIRING SETUP ============
+// ============ WHATSAPP FIX FOR GITHUB ACTIONS ============
 let waSocket = null;
 async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState('wa_auth');
-  waSocket = makeWASocket({ auth: state, logger: P({ level: 'silent' }), printQRInTerminal: false, browser: ['Cinemax', 'Chrome', '1.0'] });
-  waSocket.ev.on('creds.update', saveCreds);
-  waSocket.ev.on('connection.update', (u) => {
-    if (u.connection === 'open') console.log('WhatsApp Paired ✅');
-    if (u.connection === 'close') {
-      if (u.lastDisconnect?.error?.output?.statusCode!== DisconnectReason.loggedOut) startWhatsApp();
+  try {
+    // 1. GitHub Secret එකෙන් Session එක Restore කරනවා
+    if(process.env.WA_SESSION){
+      if(!fs.existsSync('wa_auth')) fs.mkdirSync('wa_auth', {recursive:true});
+      const sessJson = Buffer.from(process.env.WA_SESSION, 'base64').toString();
+      fs.writeFileSync('wa_auth/creds.json', sessJson);
+      console.log('✅ WA Session Restored from Secret!');
     }
-  });
+
+    const { state, saveCreds } = await useMultiFileAuthState('wa_auth');
+    waSocket = makeWASocket({
+      auth: state,
+      logger: P({ level: 'silent' }),
+      printQRInTerminal: false,
+      browser: ['Cinemax','Chrome','1.0'],
+      syncFullHistory: false
+    });
+
+    waSocket.ev.on('creds.update', async () => {
+      await saveCreds();
+      // 2. අලුත් Session එක Print කරනවා
+      try{
+        if(fs.existsSync('wa_auth/creds.json')){
+          const data = fs.readFileSync('wa_auth/creds.json', 'utf8');
+          const b64 = Buffer.from(data).toString('base64');
+          console.log('\n\n==== COPY THIS SECRET (WA_SESSION) ====');
+          console.log(b64);
+          console.log('========================================\n\n');
+        }
+      }catch(e){}
+    });
+
+    waSocket.ev.on('connection.update', (u) => {
+      if (u.connection === 'open') console.log('WhatsApp Paired ✅ Ready!');
+      if (u.connection === 'close') console.log('WA Closed:', u.lastDisconnect?.error?.message);
+    });
+
+  } catch(e){ console.log('WA Start Error:', e.message); }
 }
 startWhatsApp();
-// ==============================================
+// =====================================================
 
 function detectPlatform(url) {
   if (/(tiktok\.com)/i.test(url)) return 'tiktok';
@@ -92,23 +121,19 @@ async function searchMyAPI(movieName) {
 
 bot.start(async (ctx) => {
   const userName = ctx.from.first_name || 'User'; const now = new Date(); const date = now.toLocaleDateString('en-GB'); const time = now.toLocaleTimeString('en-GB', { hour12: false });
-  const caption = `👋 HI, ${userName} [•_•] I AM Active NOW 👾\n\n╭─「 DATE 」\n│📅 Date: ${date}\n│⏰ Time: ${time}\n╰──────────●●►\n╭─「 STATUS 」\n│👤 User: ${userName}\n│🧬 Version: 7.0.0 Pair Edition\n│📱 WhatsApp: Ready to Pair\n╰──────────●●►\n╭─「 OUR film site 」\n│🚀 cinemaxlk.vercel.app\n╰──────────●●►\n\n*WhatsApp Pair කරන්න:*\n\`pair 9471xxxxxxx\` කියලා එවන්න`;
-  try {
-    if (fs.existsSync(ALIVE_LOCAL_PATH)) {
-      await ctx.replyWithPhoto({ source: fs.createReadStream(ALIVE_LOCAL_PATH) }, { caption: caption, parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🎬 Search Movie', switch_inline_query_current_chat: '' }], [{ text: '🌐 Visit Site', url: 'https://cinemaxlk.vercel.app' }]] } });
-    } else { await ctx.reply(caption, { parse_mode: 'Markdown' }); }
-  } catch (e) { await ctx.reply(caption, { parse_mode: 'Markdown' }); }
+  const caption = `👋 HI, ${userName} I AM Active NOW 👾\n\n📅 Date: ${date}\n⏰ Time: ${time}\n\n🧬 Version: 8.0.0 GitHub Fix\n\n*WhatsApp Pair:*\n\`pair 9471xxxxxxx\``;
+  await ctx.reply(caption, { parse_mode: 'Markdown' });
 });
 
-// PAIR COMMAND - අලුතෙන් දැම්මේ
 bot.hears(/^pair\s+([0-9]+)$/i, async (ctx) => {
   const phoneNumber = ctx.match[1].replace(/[^0-9]/g, '');
-  if (!waSocket) return ctx.reply('❌ WhatsApp Socket Ready නෑ. තත් 5කින් ආයෙ try කරන්න.');
+  if (!waSocket) return ctx.reply('❌ WA Socket Ready නෑ. තත් 5කින් ආයෙ try කරන්න.');
   await ctx.reply(`⏳ ${phoneNumber} ට Pair Code එක හදනවා...`);
   try {
+    await new Promise(r => setTimeout(r, 2000));
     const code = await waSocket.requestPairingCode(phoneNumber);
-    await ctx.reply(`✅ *WhatsApp Pair Code:*\n\n\`${code}\`\n\n1. WhatsApp > Settings > Linked Devices\n2. Link a Device > Link with phone number\n3. Code එක දාන්න: *${code}*\n\nCode එක තත් 60න් expire වෙනවා!`, { parse_mode: 'Markdown' });
-  } catch (e) { console.error(e); ctx.reply('❌ Pair කරන්න බැරිවුණා. Number එක 9471... විදියට දාන්න. Ex: pair 94712345678'); }
+    await ctx.reply(`✅ *Pair Code:*\n\n\`${code}\`\n\nWhatsApp > Linked Devices > Link with phone number > Code එක දාන්න\n\nCode එක තත් 40න් Expire වෙනවා!`, { parse_mode: 'Markdown' });
+  } catch (e) { console.error(e); ctx.reply(`❌ Error: ${e.message}`); }
 });
 
 bot.on('text', async (ctx) => {
@@ -121,12 +146,12 @@ bot.on('text', async (ctx) => {
       socialCache.set(id, { platform: 'youtube', url: query, info: { title: yt.title, uploader: yt.uploader || yt.channel } }); setTimeout(() => socialCache.delete(id), 600000);
       const keyboard = [[{ text: '144p', callback_data: `soc_${id}_144` }, { text: '360p', callback_data: `soc_${id}_360` }, { text: '480p', callback_data: `soc_${id}_480` }], [{ text: '720p HD', callback_data: `soc_${id}_720` }, { text: '1080p FHD', callback_data: `soc_${id}_1080` }]];
       const mins = yt.duration? `${Math.floor(yt.duration / 60)}:${String(yt.duration % 60).padStart(2, '0')}` : 'N/A';
-      const captionText = `🎬 <b>${escapeHtml(yt.title)}</b>\n\n👤 <b>Channel:</b> ${escapeHtml(yt.uploader || yt.channel)}\n👁️ <b>Views:</b> ${yt.view_count?? 'N/A'}\n⏱️ <b>Duration:</b> ${mins}\n\n👇 අවශ්‍ය Quality එක තෝරන්න:`;
+      const captionText = `🎬 <b>${escapeHtml(yt.title)}</b>\n\n👤 <b>Channel:</b> ${escapeHtml(yt.uploader || yt.channel)}\n👁️ <b>Views:</b> ${yt.view_count?? 'N/A'}\n⏱️ <b>Duration:</b> ${mins}\n\n👇 Quality තෝරන්න:`;
       const opts = { caption: captionText, parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } };
       if (yt.thumbnail) { try { await ctx.replyWithPhoto(yt.thumbnail, opts); return; } catch (err) {} }
       await ctx.reply(captionText, { parse_mode: 'HTML', reply_markup: { inline_keyboard: keyboard } }); return;
     }
-    const info = await getSocialLinks(platform, query); if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ. Link එක public ද කියලා check කරන්න.');
+    const info = await getSocialLinks(platform, query); if (!info) return ctx.reply('❌ Video එක හම්බුනේ නෑ.');
     socialCache.set(id, { platform, url: query, info }); setTimeout(() => socialCache.delete(id), 600000);
     const resultObj = info.data || info.result || info; const item = Array.isArray(resultObj)? resultObj[0] : resultObj;
     const title = item?.title || 'Unknown Title'; const author = item?.author || item?.channel || 'Unknown';
@@ -155,12 +180,12 @@ bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Downloading...'); const [, id, quality] = data.split('_'); const cached = socialCache.get(id);
-    if (!cached) return ctx.reply('⌛ Session expired.'); const statusMsg = await ctx.reply('⏳ Video එක Download කරමින්...');
+    if (!cached) return ctx.reply('⌛ Session expired.'); const statusMsg = await ctx.reply('⏳ Downloading...');
     const deleteStatus = () => ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     if (cached.platform === 'youtube') {
       let filePath;
       try {
-        try { const apiRes = await fetch(`${YT_API}?url=${encodeURIComponent(cached.url)}&quality=${quality}`); const apiData = await apiRes.json(); const directLink = apiData.download_url || apiData.url || apiData.link; if (directLink) { await ctx.replyWithVideo(directLink, { caption: `✅ ${cached.info.title} (${quality}p)` }); await deleteStatus(); return; } } catch (e) { }
+        try { const apiRes = await fetch(`${YT_API}?url=${encodeURIComponent(cached.url)}&quality=${quality}`); const apiData = await apiRes.json(); const directLink = apiData.download_url || apiData.url || apiData.link; if (directLink) { await ctx.replyWithVideo(directLink, { caption: `✅ ${cached.info.title} (${quality}p)` }); await deleteStatus(); return; } } catch (e) {}
         filePath = await downloadYouTube(cached.url, quality); const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
         if (sizeMB > 49) { await deleteStatus(); return ctx.reply(`❌ File එක ${sizeMB.toFixed(1)}MB. 50MB limit.`); }
         await ctx.replyWithVideo({ source: fs.createReadStream(filePath), filename: 'video.mp4' }, { caption: `✅ ${cached.info.title} (${quality}p)`, supports_streaming: true }); await deleteStatus();
@@ -176,7 +201,7 @@ bot.on('callback_query', async (ctx) => {
     if (!cached) return ctx.reply('⌛ Session expired.'); const statusMsg = await ctx.reply('⏳ Uploading...');
     const deleteStatus = () => ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
     try { const response = await fetch(cached.url); const buffer = Buffer.from(await response.arrayBuffer()); await ctx.replyWithVideo({ source: buffer, filename: 'video.mp4' }, { caption: '✅ Done!' }); await deleteStatus(); }
-    catch (e) { await deleteStatus(); ctx.reply('❌ Upload fail. File >50MB maybe.'); } return;
+    catch (e) { await deleteStatus(); ctx.reply('❌ Upload fail.'); } return;
   }
   if (data.startsWith('mq_')) {
     await ctx.answerCbQuery(); const [, id, quality] = data.split('_'); const cached = movieCache.get(id);
@@ -187,5 +212,5 @@ bot.on('callback_query', async (ctx) => {
   }
 });
 
-bot.launch().then(() => console.log('Bot Started ✅ Pair Edition'));
+bot.launch().then(() => console.log('Bot Started ✅ v8 GitHub Fix'));
 process.once('SIGINT', () => bot.stop('SIGINT')); process.once('SIGTERM', () => bot.stop('SIGTERM'));
