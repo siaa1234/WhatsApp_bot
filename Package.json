@@ -1,12 +1,17 @@
 {
-  "name": "movie-bot",
-  "version": "1.0.0",
+  "name": "telegram-downloader-bot",
+  "version": "6.0.0",
+  "description": "Telegram bot: YouTube, TikTok, Instagram, Facebook downloader and movie search",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "btch-downloader": "latest",
     "telegraf": "^4.16.3",
-    "btch-downloader": "^1.2.0"
+    "youtube-dl-exec": "^3.0.0"
   }
 }
