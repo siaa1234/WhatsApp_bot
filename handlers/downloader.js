@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const OMDB_API = process.env.OMDB_API || 'c011220a';
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyBAd2fAvPkZNaQn5B45vkqwaIalnG8qUrc'; 
 const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
 
@@ -32,9 +33,62 @@ function convertGoogleDriveLink(url) {
   return url;
 }
 
-// Multi-API Fetcher (SnapSave, Rapid/Public Downloader, Cobalt Fallback)
+function extractYouTubeId(url) {
+  const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
+  return match ? match[1] : null;
+}
+
+// YouTube Metadata ලබා ගැනීම
+async function getYouTubeMetadata(url) {
+  try {
+    const videoId = extractYouTubeId(url);
+    if (!videoId) return null;
+
+    const res = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${videoId}&key=${YOUTUBE_API_KEY}`);
+    const data = await res.json();
+
+    if (!data.items || data.items.length === 0) return null;
+
+    const item = data.items[0];
+    return {
+      title: item.snippet.title,
+      author: item.snippet.channelTitle,
+      views: item.statistics.viewCount || 'N/A',
+      date: item.snippet.publishedAt ? item.snippet.publishedAt.split('T')[0] : 'N/A',
+      thumb: item.snippet.thumbnails?.high?.url || item.snippet.thumbnails?.default?.url,
+      url: url
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Cobalt API හරහා YouTube හෝ අනෙකුත් Social Media ලින්ක් එකකට අදාළ Quality එක ලබා ගැනීම
+async function getCobaltDownloadLink(url, quality = '720') {
+  try {
+    const res = await fetch('https://api.cobalt.tools/api/json', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, videoQuality: quality, vCodec: 'h264' })
+    });
+    const data = await res.json();
+    if (data) {
+      if (data.url) return data.url;
+      if (data.picker && data.picker.length > 0) return data.picker[0].url;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// Multi-API Fetcher (Instagram, TikTok, Facebook සඳහා)
 async function fetchSocialMediaVideo(url, platform) {
-  // Method 1: SnapSave/SaveFrom Universal API
+  // Method 1: Cobalt Direct (Best for IG, FB, TikTok)
+  const cobaltLink = await getCobaltDownloadLink(url, '720');
+  if (cobaltLink) {
+    return { url: cobaltLink, title: `${platform.toUpperCase()} Video`, thumb: null };
+  }
+
+  // Method 2: Tiklydown Fallback
   try {
     const res1 = await fetch(`https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`);
     const data1 = await res1.json();
@@ -47,7 +101,7 @@ async function fetchSocialMediaVideo(url, platform) {
     }
   } catch (e) {}
 
-  // Method 2: Public Auto-Downloader API
+  // Method 3: VKR Downloader Fallback
   try {
     const res2 = await fetch(`https://api.vkrdown.com/api/download?url=${encodeURIComponent(url)}`);
     const data2 = await res2.json();
@@ -57,23 +111,6 @@ async function fetchSocialMediaVideo(url, platform) {
         url: bestVideo.url,
         title: data2.title || `${platform} Video`,
         thumb: data2.thumbnail || null
-      };
-    }
-  } catch (e) {}
-
-  // Method 3: Public Cobalt alternative mirror
-  try {
-    const res3 = await fetch('https://cobalt-api.kwiatek.xyz/', {
-      method: 'POST',
-      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url, videoQuality: '720' })
-    });
-    const data3 = await res3.json();
-    if (data3 && data3.url) {
-      return {
-        url: data3.url,
-        title: `${platform} Video`,
-        thumb: data3.thumbnail || null
       };
     }
   } catch (e) {}
@@ -102,10 +139,49 @@ async function handleText(ctx) {
 
   const platform = detectPlatform(query);
   if (platform) {
-    const statusMsg = await ctx.reply(`🔍 ${platform.toUpperCase()} වීඩියෝ එක Download කිරීමට සූදානම් කරනවා...`);
+    const statusMsg = await ctx.reply(`🔍 ${platform.toUpperCase()} වීඩියෝ එක analyze කරනවා...`);
     const id = createId();
 
+    // YouTube සඳහා වෙනම Quality බටන් පෙන්වීම
+    if (platform === 'youtube') {
+      const ytInfo = await getYouTubeMetadata(query);
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
+
+      if (!ytInfo) return ctx.reply('❌ YouTube වීඩියෝ විස්තර ලබාගැනීමට නොහැකි විය. Link එක පරීක්ෂා කරන්න.');
+
+      socialCache.set(id, { platform: 'youtube', url: query });
+      setTimeout(() => socialCache.delete(id), 600000);
+
+      const keyboard = [
+        [
+          { text: '360p', callback_data: `soc_${id}_360` },
+          { text: '480p', callback_data: `soc_${id}_480` }
+        ],
+        [
+          { text: '720p HD', callback_data: `soc_${id}_720` },
+          { text: '1080p FHD', callback_data: `soc_${id}_1080` }
+        ]
+      ];
+
+      const captionText = `🎬 **${ytInfo.title}**\n\n` +
+                          `👤 **Channel:** ${ytInfo.author}\n` +
+                          `👁️ **Views:** ${Number(ytInfo.views).toLocaleString()}\n` +
+                          `📅 **Date:** ${ytInfo.date}\n\n` +
+                          `👇 අවශ්‍ය Quality එක තෝරන්න:`;
+
+      if (ytInfo.thumb) {
+        try {
+          await ctx.replyWithPhoto(ytInfo.thumb, { caption: captionText, parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+          return;
+        } catch (err) {}
+      }
+      await ctx.reply(captionText, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+      return;
+    }
+
+    // Instagram, TikTok, Facebook සඳහා
     const videoData = await fetchSocialMediaVideo(query, platform);
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
 
     if (videoData && videoData.url) {
       socialCache.set(id, { platform, videoUrl: videoData.url });
@@ -113,8 +189,6 @@ async function handleText(ctx) {
 
       const captionText = buildCaption(platform, videoData.title);
       const keyboard = [[{ text: '📥 Video එක ලබාගන්න (Get Video)', callback_data: `soc_${id}_get` }]];
-
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
 
       if (videoData.thumb) {
         try { 
@@ -125,7 +199,6 @@ async function handleText(ctx) {
       await ctx.reply(captionText, { reply_markup: { inline_keyboard: keyboard } });
       return;
     } else {
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id); } catch(e) {}
       return ctx.reply('❌ වීඩියෝ එක හොයාගන්න බැරි වුණා. Link එක Public එකක්ද හෝ නිවැරදිද කියා පරීක්ෂා කරන්න.');
     }
   }
@@ -174,18 +247,29 @@ async function handleCallback(ctx) {
   
   if (data.startsWith('soc_')) {
     await ctx.answerCbQuery('⏳ Downloading Video...');
-    const id = data.split('_')[1];
+    const parts = data.split('_');
+    const id = parts[1];
+    const qualityOrGet = parts[2]; // YouTube නම් quality (360, 720 ආදී), අනිත් ඒවාට 'get'
+    
     const cached = socialCache.get(id); 
     if (!cached) return ctx.reply('⌛ Expired! නැවත Link එක එවන්න.');
     
+    let videoLink = cached.videoUrl;
+    if (cached.platform === 'youtube') {
+      videoLink = await getCobaltDownloadLink(cached.url, qualityOrGet);
+    }
+
+    if (!videoLink) {
+      return ctx.reply('❌ මෙම වීඩියෝ ලින්ක් එක ලබාගත නොහැක.');
+    }
+    
     const statusMsg = await ctx.reply(`⏳ Telegram එකට Upload වෙනවා...`);
     try {
-      await ctx.replyWithVideo(cached.videoUrl, { caption: `✅ Done! POWERED BY CINEMAX` });
+      await ctx.replyWithVideo(videoLink, { caption: `✅ Done! POWERED BY CINEMAX` });
       await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(()=>{});
     } catch (e) {
       try {
-        // Direct link send failed නම් stream එකෙන් යවනවා
-        const res = await fetch(cached.videoUrl);
+        const res = await fetch(videoLink);
         const buf = Buffer.from(await res.arrayBuffer());
         await ctx.replyWithVideo({ source: buf, filename: 'video.mp4' }, { caption: `✅ Done! POWERED BY CINEMAX` });
       } catch (err) {
