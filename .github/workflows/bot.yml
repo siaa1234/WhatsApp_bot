@@ -22,6 +22,16 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Setup Python (Required for yt-dlp)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install yt-dlp globally
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
       - name: Debug - Show files
         run: |
           pwd
@@ -34,7 +44,7 @@ jobs:
           if [ -f package.json ]; then
             npm install
           else
-            npm install telegraf btch-downloader
+            npm install telegraf youtube-dl-exec
           fi
 
       - name: Run Bot
