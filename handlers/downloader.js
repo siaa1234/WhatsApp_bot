@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { getSearch, getDetails, getDownload } = require('sinhalasub.lk');
 const { SinhalaSub } = require('@sl-code-lords/movie-api');
 
 const OMDB_API = process.env.OMDB_API || '966ab6ea';
@@ -12,7 +11,7 @@ const LOCAL_BOT_API = process.env.LOCAL_BOT_API || ''; // e.g. http://localhost:
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
 // Local Bot API server එකක් නම් 2GB වෙනක් upload කරන්න පුළුවන්
 const MAX_TG_SIZE = LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
-const SITE_NAME = 'sinhalasub.lk';
+const SITE_NAME = 'cinesubz.co';
 
 const socialCache = new Map();
 const directCache = new Map();
@@ -90,46 +89,7 @@ function buildCaption(platform, title){
   return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
 
-// ===== SINHALASUB.LK (npm: sinhalasub.lk) =====
-async function searchSinhalasub(query){
-  try{
-    const res = await getSearch(query);
-    const items = res?.result || [];
-    if(!Array.isArray(items) || !items.length) return null;
-    const q = query.toLowerCase();
-    const best = items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
-    return best;
-  }catch(e){ console.log('sinhalasub search error:', e.message); return null; }
-}
-
-async function getSinhalasubMovie(movieUrl){
-  try{
-    const res = await getDetails(movieUrl);
-    const d = res?.result || res;
-    if(!d) return null;
-    const dl = Array.isArray(d.dl_links) ? d.dl_links : [];
-    const links = { '480p':[], '720p':[], '1080p':[] };
-    for(const item of dl){
-      if(!item?.link || !item?.quality) continue;
-      if(/subtitle/i.test(item.quality)) continue;
-      const q = item.quality.match(/(480|720|1080)\s*p/i);
-      if(!q) continue;
-      const key = q[1] + 'p';
-      if(!links[key].some(x=>x.link===item.link)) links[key].push(item);
-    }
-    return { title: d.title || '', poster: d.img || d.poster || d.image || null, url: movieUrl, links, noGateway: false };
-  }catch(e){ console.log('sinhalasub details error:', e.message); return null; }
-}
-
-async function resolveGatewayLink(gwUrl){
-  try{
-    const res = await getDownload(gwUrl);
-    const d = res?.result || res;
-    return d?.link || d?.url || d?.download_link || (typeof res === 'string' ? res : null);
-  }catch(e){ return null; }
-}
-
-// ===== FALLBACK: @sl-code-lords/movie-api (direct links, no gateway resolve needed) =====
+// ===== CINESUBZ (@sl-code-lords/movie-api) - details + links =====
 async function searchCinesubz(query){
   try{
     const res = await SinhalaSub.get_list.by_search(query);
@@ -157,8 +117,28 @@ async function getCinesubzMovie(movieUrl){
       const key = q[1] + 'p';
       if(!links[key].some(x=>x.link===link)) links[key].push({quality, size:item?.size||'', link});
     }
-    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links, noGateway: true };
+    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links };
   }catch(e){ console.log('cinesubz details error:', e.message); return null; }
+}
+
+// ===== OMDB - poster + metadata විතරයි =====
+async function getOmdbData(query){
+  if(!OMDB_API) return null;
+  try{
+    const r = await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
+    const omdb = await r.json();
+    if(omdb.Response !== 'True') return null;
+    return {
+      title: omdb.Title,
+      release: omdb.Released && omdb.Released!=='N/A' ? omdb.Released : (omdb.Year || 'N/A'),
+      duration: omdb.Runtime && omdb.Runtime!=='N/A' ? omdb.Runtime : 'N/A',
+      imdb: omdb.imdbRating && omdb.imdbRating!=='N/A' ? omdb.imdbRating : 'N/A',
+      genres: omdb.Genre && omdb.Genre!=='N/A' ? omdb.Genre : 'N/A',
+      country: omdb.Country && omdb.Country!=='N/A' ? omdb.Country : 'N/A',
+      plot: omdb.Plot && omdb.Plot!=='N/A' ? omdb.Plot : 'No description available.',
+      poster: omdb.Poster && omdb.Poster!=='N/A' ? omdb.Poster : null
+    };
+  }catch(e){ return null; }
 }
 
 // ===== VIDEO SEND =====
@@ -224,43 +204,32 @@ async function handleText(ctx){
     await ctx.reply('🔗 Link එක හඳුනාගැනිණි!',{reply_markup:{inline_keyboard:[[{text:'📥 Send as Video',callback_data:`send_${id}`}]]}});return;
   }
 
-  // ===== MOVIE SEARCH - SINHALASUB.LK + CINESUBZ FALLBACK =====
+  // ===== MOVIE SEARCH - OMDB (poster/info) + CINESUBZ (details/links) =====
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try{
-    let omdb={Response:'False'};
-    if(OMDB_API){
-      try{
-        const r=await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
-        omdb=await r.json();
-      }catch(e){}
-    }
-
-    let searchHit = await searchSinhalasub(query);
-    let csMovie = searchHit ? await getSinhalasubMovie(searchHit.url) : null;
-
-    // fallback: @sl-code-lords/movie-api
-    if(!csMovie || !Object.values(csMovie.links).some(a=>a.length)){
-      const csHit = await searchCinesubz(query);
-      if(csHit?.url){
-        const csAlt = await getCinesubzMovie(csHit.url);
-        if(csAlt && Object.values(csAlt.links).some(a=>a.length)) csMovie = csAlt;
-      }
-    }
-
-    if(omdb.Response==='False' && !csMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
-
-    const title = omdb.Title || csMovie?.title || query;
-    const release = omdb.Released && omdb.Released!=='N/A'? omdb.Released : (omdb.Year || 'N/A');
-    const duration = omdb.Runtime && omdb.Runtime!=='N/A'? omdb.Runtime : 'N/A';
-    const imdb = omdb.imdbRating && omdb.imdbRating!=='N/A'? omdb.imdbRating : 'N/A';
-    const genres = omdb.Genre && omdb.Genre!=='N/A'? omdb.Genre : 'N/A';
-    const country = omdb.Country && omdb.Country!=='N/A'? omdb.Country : 'N/A';
-    const plot = omdb.Plot && omdb.Plot!=='N/A'? omdb.Plot : 'No description available.';
-    const poster = omdb.Poster && omdb.Poster!=='N/A'? omdb.Poster : null;
-
-    const photoSource = poster || csMovie?.poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : null);
-
+    // 1) Cinesubz එකෙන් details + links
+    const csHit = await searchCinesubz(query);
+    let csMovie = csHit?.url ? await getCinesubzMovie(csHit.url) : null;
     const hasLinks = csMovie && Object.values(csMovie.links).some(a=>a.length);
+
+    // 2) OMDB එකෙන් poster + metadata විතරයි
+    const omdb = await getOmdbData(query);
+
+    if(!hasLinks && !omdb) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
+
+    // Title: OMDB එකේ තියෙනවා නම් ඒක, නැත්නම් cinesubz title
+    const title = omdb?.title || csMovie?.title || query;
+    const release = omdb?.release || 'N/A';
+    const duration = omdb?.duration || 'N/A';
+    const imdb = omdb?.imdb || 'N/A';
+    const genres = omdb?.genres || 'N/A';
+    const country = omdb?.country || 'N/A';
+    const plot = omdb?.plot || 'No description available.';
+
+    // ★ POSTER: OMDB එකෙන් විතරක්. OMDB එකේ නැත්නම් fallback (local image)
+    const poster = omdb?.poster || null;
+    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : null);
+
     const movieId=createId();
     setCache(movieCache, movieId, {query,title,csMovie});
 
@@ -346,16 +315,12 @@ async function handleCallback(ctx){
     const items=cached.csMovie?.links?.[quality]||[];
     if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
 
-    // resolve all gateway links -> direct (cinesubz fallback එකෙන් ආවා නම් already direct)
+    // cinesubz links ටික direct නිසා gateway resolve ඕන නෑ
     const dlId=createId();
-    const resolved=[];
-    for(const item of items){
-      const direct = cached.csMovie.noGateway ? item.link : await resolveGatewayLink(item.link);
-      resolved.push({quality:item.quality, size:item.size, gw:item.link, direct});
-    }
+    const resolved=items.map(item=>({quality:item.quality, size:item.size, gw:item.link, direct:item.link}));
     setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
 
-    // AUTO TG DOWNLOAD: first working direct link එකෙන් කෙලින්ම upload කරනවා
+    // AUTO TG UPLOAD: පළවෙනි direct link එකෙන් කෙලින්ම Telegram එකට upload
     const best = resolved.find(r=>r.direct);
     if(best){
       const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} Telegram එකට download වෙනවා...\n📦 Size: ${best.size||'Unknown'}\n\nටිකක් ගන්න පුළුවන්.`);
@@ -367,11 +332,11 @@ async function handleCallback(ctx){
         await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් ඕන එක download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
         return;
       }
+      // fail වුනොත් අනිත් links try කරන්න පුළුවන් විදිහට keyboard එක පෙන්නනවා
       await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). ඒත් links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
       return;
     }
 
-    // no direct links resolved -> show gateway/direct url buttons
     await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 Download කරන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
     return;
   }
