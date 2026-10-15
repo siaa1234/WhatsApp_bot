@@ -4,9 +4,28 @@ const path = require('path');
 const fs = require('fs');
 
 const MAX_TG_SIZE = 48 * 1024 * 1024; // GitHub Actions + public Bot API = 50MB
-const YT_COOKIES = process.env.YT_COOKIES_FILE || '';
+const MAX_DURATION = 10 * 60; // runner limit නිසා 10 min වඩා දිග videos skip
 
-const MAX_DURATION = 10 * 60; // 10 min වඩා වැඩි videos skip කරන්න (runner limit නිසා)
+// YouTube bot-check bypass සඳහා common args
+const BASE_ARGS = [
+  '--extractor-args', 'youtube:player_client=default,web_safari;formats=duplicate,missing_pot',
+  '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+  '--force-ipv4',
+  '--retries', '3',
+  '--socket-timeout', '20',
+  '--no-warnings'
+];
+
+const YT_COOKIES_B64 = process.env.YT_COOKIES_B64 || '';
+
+function ensureCookies() {
+  if (!YT_COOKIES_B64) return '';
+  const p = '/tmp/cookies.txt';
+  if (!fs.existsSync(p)) {
+    fs.writeFileSync(p, Buffer.from(YT_COOKIES_B64, 'base64'));
+  }
+  return p;
+}
 
 function esc(s) {
   return String(s ?? '')
@@ -17,9 +36,20 @@ function esc(s) {
 
 function runYtdlp(args) {
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', args, { maxBuffer: 1024 * 1024 * 64, timeout: 540000 },
+    execFile('yt-dlp', [...BASE_ARGS, ...args], { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
       (err, stdout, stderr) => {
-        if (err) return reject(new Error((stderr || err.message).split('\n').slice(-3).join(' ')));
+        if (err) {
+          const msg = stderr || err.message;
+
+          if (/Sign in to confirm/.test(msg)) {
+            return reject(new Error(
+              'YouTube මේ server IP එක block කරලා. ' +
+              'Repo Settings → Secrets → YT_COOKIES_B64 secret එක දාලා cookies enable කරන්න.'
+            ));
+          }
+
+          return reject(new Error(msg.split('\n').filter(Boolean).slice(-3).join(' | ')));
+        }
         resolve(stdout.trim());
       });
   });
@@ -41,9 +71,9 @@ function extractUrl(text) {
 }
 
 async function getInfo(url) {
-  const args = [url, '--dump-json', '--no-warnings', '--no-playlist',
-    '-R', '2', '--socket-timeout', '20'];
-  if (YT_COOKIES) args.push('--cookies', YT_COOKIES);
+  const args = [url, '--dump-json', '--no-playlist', '-R', '2'];
+  const cookieFile = ensureCookies();
+  if (cookieFile) args.push('--cookies', cookieFile);
 
   const info = JSON.parse((await runYtdlp(args)).split('\n')[0]);
 
@@ -63,7 +93,7 @@ async function getInfo(url) {
   for (const f of formats) {
     if (seen.has(f.height)) continue;
     const size = f.filesize || f.filesize_approx || 0;
-    if (size && size > MAX_TG_SIZE) continue; // 50MB ට වඩා ලොකු options නොපෙන්නන්න
+    if (size && size > MAX_TG_SIZE) continue;
     seen.add(f.height);
     qualities.push({
       height: f.height,
@@ -84,17 +114,34 @@ async function getInfo(url) {
   };
 }
 
-async function download(url, format, outPrefix) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `${outPrefix}-`));
-  const outPath = path.join(dir, `${outPrefix}.%(ext)s`);
+async function downloadVideo(url, height) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ytd-'));
+  const format = height
+    ? `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`
+    : 'bestvideo+bestaudio/best';
 
   const args = [url, '-f', format, '--merge-output-format', 'mp4',
-    '-o', outPath, '--no-playlist', '--no-warnings'];
-  if (YT_COOKIES) args.push('--cookies', YT_COOKIES);
+    '-o', path.join(dir, 'video.%(ext)s'), '--no-playlist'];
+  const cookieFile = ensureCookies();
+  if (cookieFile) args.push('--cookies', cookieFile);
 
   await runYtdlp(args);
 
-  const file = fs.readdirSync(dir).find(f => f.startsWith(outPrefix));
+  const file = fs.readdirSync(dir).find(f => f.startsWith('video.'));
+  return file ? path.join(dir, file) : null;
+}
+
+async function downloadAudio(url) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yta-'));
+
+  const args = [url, '-x', '--audio-format', 'mp3', '--audio-quality', '5',
+    '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist'];
+  const cookieFile = ensureCookies();
+  if (cookieFile) args.push('--cookies', cookieFile);
+
+  await runYtdlp(args);
+
+  const file = fs.readdirSync(dir).find(f => f.startsWith('audio.'));
   return file ? path.join(dir, file) : null;
 }
 
@@ -105,6 +152,10 @@ function cleanup(filePath) {
 }
 
 const pendingCache = new Map();
+
+function createId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
 
 async function handleDlCommand(ctx) {
   const url = extractUrl(ctx.message?.text);
@@ -128,7 +179,7 @@ async function handleDlCommand(ctx) {
       return ctx.reply('❌ 50MB limit ඇතුළට ගැලපෙන video format එකක් නැහැ.');
     }
 
-    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    const id = createId();
     pendingCache.set(id, info);
     setTimeout(() => pendingCache.delete(id), 600000).unref?.();
 
@@ -192,20 +243,9 @@ async function handleDlCallback(ctx) {
   let filePath = null;
 
   try {
-    if (isAudio) {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yta-'));
-      const args = [info.url, '-x', '--audio-format', 'mp3', '--audio-quality', '5',
-        '-o', path.join(dir, 'audio.%(ext)s'), '--no-playlist', '--no-warnings'];
-      if (YT_COOKIES) args.push('--cookies', YT_COOKIES);
-      await runYtdlp(args);
-      const f = fs.readdirSync(dir).find(f => f.startsWith('audio.'));
-      filePath = f ? path.join(dir, f) : null;
-    } else {
-      const format = height
-        ? `bestvideo[height<=${height}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${height}]/best`
-        : 'bestvideo+bestaudio/best';
-      filePath = await download(info.url, format, 'video');
-    }
+    filePath = isAudio
+      ? await downloadAudio(info.url)
+      : await downloadVideo(info.url, height);
 
     if (!filePath) throw new Error('Download failed');
 
@@ -247,7 +287,6 @@ async function handleDlCallback(ctx) {
 function isSocialCommand(ctx) {
   const text = ctx.message?.text || '';
   if (text.startsWith('/dl')) return true;
-  // /movie, /tv නැති text වල link තියෙනවා නම් social download
   if (!text.startsWith('/') && extractUrl(text)) return true;
   return false;
 }
