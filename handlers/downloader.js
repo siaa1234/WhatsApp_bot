@@ -6,16 +6,18 @@ const OMDB_API = process.env.OMDB_API || '966ab6ea';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const COBALT_API_URL = process.env.COBALT_API_URL;
 const COBALT_API_KEY = process.env.COBALT_API_KEY;
-const LOCAL_BOT_API = process.env.LOCAL_BOT_API || ''; // e.g. http://localhost:8081
+const LOCAL_BOT_API = process.env.LOCAL_BOT_API || '';
+
+const MY_API_URL = "https://raw.githubusercontent.com/siaa1234/cineflix/main/cinesubz.json";
 
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
-// Local Bot API server එකක් නම් 2GB වෙනක් upload කරන්න පුළුවන්
-const MAX_TG_SIZE = LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
+const MAX_TG_SIZE = LOCAL_BOT_API? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
 const SITE_NAME = 'cinesubz.co';
 
 const socialCache = new Map();
 const directCache = new Map();
 const movieCache = new Map();
+const tvCache = new Map();
 const dlCache = new Map();
 
 const COBALT_INSTANCES = [COBALT_API_URL, 'https://api.cobalt.tools/'].filter(Boolean);
@@ -29,6 +31,35 @@ function fetchWithTimeout(url, options={}, ms=20000){
 }
 function setCache(map,id,value,ttl=600000){ map.set(id,value); setTimeout(()=>map.delete(id),ttl); }
 
+// ===== YOUR API =====
+async function fetchMyApi(){
+  try{
+    const r = await fetchWithTimeout(MY_API_URL, {}, 15000);
+    const j = await r.json();
+    // ඔයාගේ json එක { latest: [...] } format එකේ
+    if(j.latest && Array.isArray(j.latest)) return j.latest;
+    if(Array.isArray(j)) return j;
+    return [];
+  }catch(e){ console.log("MY API Error", e.message); return []; }
+}
+
+async function searchMyApi(query){
+  const all = await fetchMyApi();
+  if(!all.length) return null;
+  const q = query.toLowerCase();
+  // title එක ඇතුලේ query එක තියෙන එක හොයනවා
+  let found = all.filter(m => (m.title||'').toLowerCase().includes(q));
+  // exact match එකට priority
+  found.sort((a,b) => {
+    const at = a.title.toLowerCase(), bt = b.title.toLowerCase();
+    if(at === q) return -1;
+    if(bt === q) return 1;
+    return 0;
+  });
+  return found.length? found[0] : null;
+}
+
+// ===== PLATFORM DETECT =====
 function detectPlatform(url){
   if(/(tiktok\.com)/i.test(url)) return 'tiktok';
   if(/(instagram\.com)/i.test(url)) return 'instagram';
@@ -38,18 +69,18 @@ function detectPlatform(url){
 }
 function detectDirectLink(url){
   if(/(drive\.google\.com|docs\.google\.com)/i.test(url)) return 'gdrive';
-  if(/^https?:\/\/.+/i.test(url) && !detectPlatform(url)) return 'direct';
+  if(/^https?:\/\/.+/i.test(url) &&!detectPlatform(url)) return 'direct';
   return null;
 }
 function convertGoogleDriveLink(url){
   const match = url.match(/\/d\/(.*?)\/|\?id=(.*?)(&|$)/);
-  const fileId = match ? (match[1]||match[2]) : null;
+  const fileId = match? (match[1]||match[2]) : null;
   if(fileId) return `https://drive.google.com/uc?export=download&id=${fileId}`;
   return url;
 }
 function extractYouTubeId(url){
   const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-  return m ? m[1] : null;
+  return m? m[1] : null;
 }
 async function getYouTubeMetadata(url){
   try{
@@ -89,59 +120,64 @@ function buildCaption(platform, title){
   return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
 
-// ===== CINESUBZ (@sl-code-lords/movie-api) - details + links =====
-async function searchCinesubz(query){
-  try{
-    const res = await SinhalaSub.get_list.by_search(query);
-    const items = res?.result || res;
-    if(!Array.isArray(items) || !items.length) return null;
-    const q = query.toLowerCase();
-    return items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
-  }catch(e){ console.log('cinesubz search error:', e.message); return null; }
-}
-
+// ===== CINESUBZ DETAILS =====
 async function getCinesubzMovie(movieUrl){
   try{
     const res = await SinhalaSub.movie(movieUrl);
     const d = res?.result || res;
     if(!d) return null;
-    const dl = Array.isArray(d.dl_links) ? d.dl_links : [];
+    const dl = Array.isArray(d.dl_links)? d.dl_links : [];
     const links = { '480p':[], '720p':[], '1080p':[] };
+    let episodes = []; // TV Series වලට
+
     for(const item of dl){
       const link = item?.link || item?.url;
-      const quality = item?.quality || item?.label;
-      if(!link || !quality) continue;
-      if(/subtitle/i.test(quality)) continue;
-      const q = quality.match(/(480|720|1080)\s*p/i);
-      if(!q) continue;
-      const key = q[1] + 'p';
-      if(!links[key].some(x=>x.link===link)) links[key].push({quality, size:item?.size||'', link});
+      const qualityLabel = item?.quality || item?.label || '';
+      const epName = item?.episode || item?.title || qualityLabel;
+      if(!link) continue;
+      if(/subtitle/i.test(qualityLabel) &&!/episode/i.test(qualityLabel)) continue;
+
+      // Episode detect කරන logic
+      let epMatch = epName.match(/(?:E|Episode)\s*0*(\d+)/i) || qualityLabel.match(/S\d+\s*E0*(\d+)/i);
+      let epNum = epMatch? parseInt(epMatch[1]) : null;
+
+      // Quality detect
+      const q = qualityLabel.match(/(480|720|1080)\s*p/i);
+      const key = q? q[1]+'p' : '720p';
+
+      if(epNum){ // TV Series
+        let ep = episodes.find(e => e.num === epNum);
+        if(!ep){ ep = { num: epNum, title: `Episode ${epNum}`, links: {'480p':[], '720p':[], '1080p':[]} }; episodes.push(ep); }
+        ep.links[key].push({quality: qualityLabel, size:item?.size||'', link});
+      }else{
+        if(!links[key].some(x=>x.link===link)) links[key].push({quality: qualityLabel, size:item?.size||'', link, epName});
+      }
     }
-    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links };
+    episodes.sort((a,b)=>a.num-b.num);
+    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links, episodes, isSeries: episodes.length > 0 };
   }catch(e){ console.log('cinesubz details error:', e.message); return null; }
 }
 
-// ===== OMDB - poster + metadata විතරයි =====
+// ===== OMDB - poster + details විතරයි =====
 async function getOmdbData(query){
   if(!OMDB_API) return null;
   try{
     const r = await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
     const omdb = await r.json();
-    if(omdb.Response !== 'True') return null;
+    if(omdb.Response!== 'True') return null;
     return {
       title: omdb.Title,
-      release: omdb.Released && omdb.Released!=='N/A' ? omdb.Released : (omdb.Year || 'N/A'),
-      duration: omdb.Runtime && omdb.Runtime!=='N/A' ? omdb.Runtime : 'N/A',
-      imdb: omdb.imdbRating && omdb.imdbRating!=='N/A' ? omdb.imdbRating : 'N/A',
-      genres: omdb.Genre && omdb.Genre!=='N/A' ? omdb.Genre : 'N/A',
-      country: omdb.Country && omdb.Country!=='N/A' ? omdb.Country : 'N/A',
-      plot: omdb.Plot && omdb.Plot!=='N/A' ? omdb.Plot : 'No description available.',
-      poster: omdb.Poster && omdb.Poster!=='N/A' ? omdb.Poster : null
+      release: omdb.Released && omdb.Released!=='N/A'? omdb.Released : (omdb.Year || 'N/A'),
+      duration: omdb.Runtime && omdb.Runtime!=='N/A'? omdb.Runtime : 'N/A',
+      imdb: omdb.imdbRating && omdb.imdbRating!=='N/A'? omdb.imdbRating : 'N/A',
+      genres: omdb.Genre && omdb.Genre!=='N/A'? omdb.Genre : 'N/A',
+      country: omdb.Country && omdb.Country!=='N/A'? omdb.Country : 'N/A',
+      plot: omdb.Plot && omdb.Plot!=='N/A'? omdb.Plot : 'No description available.',
+      poster: omdb.Poster && omdb.Poster!=='N/A'? omdb.Poster : null
     };
   }catch(e){ return null; }
 }
 
-// ===== VIDEO SEND =====
 async function sendVideoFromUrl(ctx, videoLink){
   const caption='✅ Done! POWERED BY CINEMAX';
   try{ await ctx.replyWithVideo(videoLink,{caption}); return{ok:true}; }catch(e){}
@@ -171,24 +207,25 @@ function buildDlKeyboard(dlId, resolved){
 
 // ===== TEXT HANDLER =====
 async function handleText(ctx){
-  const query=ctx.message.text?.trim();
-  if(!query||query.startsWith('/')) return;
+  const raw=ctx.message.text?.trim();
+  if(!raw||raw.startsWith('/')) return;
 
-  const platform=detectPlatform(query);
+  // Social / Direct check
+  const platform=detectPlatform(raw);
   if(platform){
     const statusMsg=await ctx.reply(`🔍 ${platform.toUpperCase()} වීඩියෝ එක analyze කරනවා...`);
     const id=createId();
     if(platform==='youtube'){
-      const ytInfo=await getYouTubeMetadata(query);
+      const ytInfo=await getYouTubeMetadata(raw);
       try{await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id);}catch(e){}
       const info=ytInfo||{title:'YouTube Video',author:'Unknown',views:'N/A',date:'N/A',thumb:null};
-      setCache(socialCache,id,{platform:'youtube',url:query});
+      setCache(socialCache,id,{platform:'youtube',url:raw});
       const kb=[[{text:'360p',callback_data:`soc_${id}_360`},{text:'480p',callback_data:`soc_${id}_480`}],[{text:'720p HD',callback_data:`soc_${id}_720`},{text:'1080p FHD',callback_data:`soc_${id}_1080`}]];
       const captionText=`🎬 <b>${esc(info.title)}</b>\n\n👤 <b>Channel:</b> ${esc(info.author)}\n👁️ <b>Views:</b> ${esc(info.views)}\n📅 <b>Date:</b> ${esc(info.date)}\n\n👇 අවශ්‍ය Quality එක තෝරන්න:`;
       if(info.thumb){try{await ctx.replyWithPhoto(info.thumb,{caption:captionText,parse_mode:'HTML',reply_markup:{inline_keyboard:kb}});return;}catch(e){}}
       await ctx.reply(captionText,{parse_mode:'HTML',reply_markup:{inline_keyboard:kb}});return;
     }
-    const videoData=await fetchSocialMediaVideo(query,platform);
+    const videoData=await fetchSocialMediaVideo(raw,platform);
     try{await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id);}catch(e){}
     if(videoData?.url){
       setCache(socialCache,id,{platform,videoUrl:videoData.url});
@@ -197,41 +234,45 @@ async function handleText(ctx){
     return ctx.reply('❌ වීඩියෝ එක හොයාගන්න බැරි වුණා.');
   }
 
-  const directType=detectDirectLink(query);
+  const directType=detectDirectLink(raw);
   if(directType){
-    let finalUrl=directType==='gdrive'?convertGoogleDriveLink(query):query;
+    let finalUrl=directType==='gdrive'?convertGoogleDriveLink(raw):raw;
     const id=createId(); setCache(directCache,id,{url:finalUrl});
     await ctx.reply('🔗 Link එක හඳුනාගැනිණි!',{reply_markup:{inline_keyboard:[[{text:'📥 Send as Video',callback_data:`send_${id}`}]]}});return;
   }
 
-  // ===== MOVIE SEARCH - OMDB (poster/info) + CINESUBZ (details/links) =====
-  await ctx.reply(`🔍 "${query}" හොයනවා...`);
+  // ===== FILM / TV DETECT =====
+  let mode = 'film'; // default film
+  let query = raw;
+  if(raw.toLowerCase().startsWith('film ')){ mode='film'; query=raw.slice(5).trim(); }
+  else if(raw.toLowerCase().startsWith('tv ')){ mode='tv'; query=raw.slice(3).trim(); }
+  else if(raw.toLowerCase().startsWith('movie ')){ mode='film'; query=raw.slice(6).trim(); }
+
+  if(!query) return ctx.reply("Use: \n`film avatar`\n`tv breaking bad`", {parse_mode:'Markdown'});
+
+  await ctx.reply(`🔍 ${mode==='tv'?'TV Series':'Movie'} "${query}" හොයනවා...\n📡 My API එකෙන්...`);
+
   try{
-    // 1) Cinesubz එකෙන් details + links
-    const csHit = await searchCinesubz(query);
-    let csMovie = csHit?.url ? await getCinesubzMovie(csHit.url) : null;
-    const hasLinks = csMovie && Object.values(csMovie.links).some(a=>a.length);
+    // 1) MY API එකෙන් හොයනවා
+    const myHit = await searchMyApi(query);
+    if(!myHit) return ctx.reply(`❌ "${query}" My API එකේ හම්බුනේ නෑ.\n${MY_API_URL}`);
 
-    // 2) OMDB එකෙන් poster + metadata විතරයි
-    const omdb = await getOmdbData(query);
+    // 2) Cinesubz Details (links + episodes) ගන්නවා
+    const csMovie = await getCinesubzMovie(myHit.url);
+    if(!csMovie) return ctx.reply('❌ Details ගන්න බැරි වුණා.');
 
-    if(!hasLinks && !omdb) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
+    // 3) OMDB එකෙන් poster + details විතරයි
+    const omdb = await getOmdbData(query) || await getOmdbData(myHit.title) || await getOmdbData(csMovie.title);
 
-    // Title: OMDB එකේ තියෙනවා නම් ඒක, නැත්නම් cinesubz title
-    const title = omdb?.title || csMovie?.title || query;
+    const title = omdb?.title || csMovie.title || myHit.title || query;
     const release = omdb?.release || 'N/A';
     const duration = omdb?.duration || 'N/A';
     const imdb = omdb?.imdb || 'N/A';
     const genres = omdb?.genres || 'N/A';
     const country = omdb?.country || 'N/A';
     const plot = omdb?.plot || 'No description available.';
-
-    // ★ POSTER: OMDB එකෙන් විතරක්. OMDB එකේ නැත්නම් fallback (local image)
-    const poster = omdb?.poster || null;
+    const poster = omdb?.poster || myHit.poster || csMovie.poster || null;
     const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : null);
-
-    const movieId=createId();
-    setCache(movieCache, movieId, {query,title,csMovie});
 
     const caption =
 `☘️ *NAME* ☛ ${title}
@@ -239,7 +280,6 @@ async function handleText(ctx){
 *▫️📅 𝗥𝗲𝗹𝗲𝗮𝘀𝗲* ☛ ${release}
 *▫️⏱ 𝗗ᴜʀᴀᴛɪᴏɴ* ☛ ${duration}
 *▫️⭐ 𝗜𝗠𝗗𝗕* ☛ ${imdb}
-
 *▫️🎭 𝗚ᴇɴʀᴇꜱ* ☛ ${genres}
 *▫️🌎 𝗖ᴏᴜɴᴛʀʏ* ☛ ${country}
 
@@ -251,25 +291,67 @@ ${plot}
 ${SITE_NAME} ◇
 *➟➟➟➟➟➟➟➟*`;
 
-    const kb=[];
-    if(hasLinks){
+    if(mode === 'tv' || csMovie.isSeries){
+      // ===== TV SERIES =====
+      const tvId = createId();
+      setCache(tvCache, tvId, {title, csMovie, omdb}, 1800000);
+
+      let kb = [];
+      if(csMovie.episodes.length > 0){
+        // Episode 1, Episode 2... buttons
+        for(const ep of csMovie.episodes){
+          kb.push([{text:`📺 Episode ${ep.num} Download`, callback_data:`tve_${tvId}_${ep.num}`}]);
+        }
+      }else{
+        // Episode detect වුනේ නැත්නම් dl_links ටිකම episodes විදියට දානවා
+        const allLinks = [...csMovie.links['480p'],...csMovie.links['720p'],...csMovie.links['1080p']];
+        // unique by epName group
+        const grouped = {};
+        allLinks.forEach(l => {
+          const name = l.epName || l.quality;
+          if(!grouped[name]) grouped[name] = [];
+          grouped[name].push(l);
+        });
+        let i=1;
+        for(const name in grouped){
+          kb.push([{text:`📺 ${name.slice(0,40)} Download`, callback_data:`tve_${tvId}_custom_${i}`}]);
+          // store custom mapping
+          tvCache.set(tvId+`_custom_${i}`, grouped[name]);
+          i++;
+          if(i>30) break; // limit 30
+        }
+      }
+      kb.push([{text:'🌐 Visit Site', url: csMovie.url}]);
+
+      if(photoSource){
+        try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+        catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+      }else{
+        await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+      }
+    }else{
+      // ===== MOVIE =====
+      const movieId=createId();
+      setCache(movieCache, movieId, {query,title,csMovie});
+
+      const kb=[];
       const q480=csMovie.links['480p'].length, q720=csMovie.links['720p'].length, q1080=csMovie.links['1080p'].length;
       const row=[];
       if(q480) row.push({text:'480P', callback_data:`mq_${movieId}_480p`});
       if(q720) row.push({text:'720P', callback_data:`mq_${movieId}_720p`});
       if(row.length) kb.push(row);
       if(q1080) kb.push([{text:'1080P', callback_data:`mq_${movieId}_1080p`}]);
-    }
-    kb.push([{text:'🌐 Visit Site', url: csMovie?.url || `https://${SITE_NAME}`}]);
+      kb.push([{text:'🌐 Visit Site', url: csMovie.url}]);
 
-    if(photoSource){
-      try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-      catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-    }else{
-      await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+      if(photoSource){
+        try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+        catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+      }else{
+        await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+      }
     }
 
-  }catch(e){ console.log('Movie search error', e.message); ctx.reply('❌ Error එකක් ආවා.'); }
+  }catch(e){ console.log('Movie search error', e); ctx.reply('❌ Error එකක් ආවා.'); }
 }
 
 // ===== CALLBACK HANDLER =====
@@ -308,35 +390,96 @@ async function handleCallback(ctx){
     return;
   }
 
-  if(data.startsWith('mq_')){
+  // TV Episode Click -> Quality Select
+  if(data.startsWith('tve_')){
+    await ctx.answerCbQuery().catch(()=>{});
+    const parts = data.split('_');
+    const tvId = parts[1];
+    const cached = tvCache.get(tvId);
+    if(!cached) return ctx.reply('⌛ Expired. නැවත TV Series එක හොයන්න. `tv name`');
+
+    let episodeNum = parts[2];
+    let episode = null;
+    if(episodeNum === 'custom'){
+      const customId = parts[3];
+      const customLinks = tvCache.get(tvId+`_custom_${customId}`);
+      // custom එක quality select එකට යවන්න
+      const qId = createId();
+      const linksByQ = {'480p':[], '720p':[], '1080p':[]};
+      customLinks.forEach(l=>{
+        const qm = l.quality.match(/(480|720|1080)/);
+        if(qm) linksByQ[qm[1]+'p'].push(l);
+        else linksByQ['720p'].push(l);
+      });
+      setCache(dlCache, qId, {title: `${cached.title} - Part ${customId}`, links: linksByQ}, 1800000);
+      const kb=[];
+      if(linksByQ['480p'].length) kb.push([{text:'480P', callback_data:`tvmq_${qId}_480p`}]);
+      if(linksByQ['720p'].length) kb.push([{text:'720P', callback_data:`tvmq_${qId}_720p`}]);
+      if(linksByQ['1080p'].length) kb.push([{text:'1080P', callback_data:`tvmq_${qId}_1080p`}]);
+      return ctx.reply(`📺 ${cached.title} - Episode / Part ${customId}\n\n👇 Quality එක තෝරන්න:`, {reply_markup:{inline_keyboard:kb}});
+    }else{
+      episodeNum = parseInt(episodeNum);
+      episode = cached.csMovie.episodes.find(e=>e.num===episodeNum);
+      if(!episode) return ctx.reply('❌ Episode එක හම්බුනේ නෑ.');
+      const qId = createId();
+      setCache(dlCache, qId, {title: `${cached.title} - Episode ${episodeNum}`, links: episode.links}, 1800000);
+      const kb=[];
+      if(episode.links['480p'].length) kb.push([{text:'480P', callback_data:`tvmq_${qId}_480p`}]);
+      if(episode.links['720p'].length) kb.push([{text:'720P', callback_data:`tvmq_${qId}_720p`}]);
+      if(episode.links['1080p'].length) kb.push([{text:'1080P', callback_data:`tvmq_${qId}_1080p`}]);
+      return ctx.reply(`📺 ${cached.title}\n🎬 Episode ${episodeNum}\n\n👇 Quality එක තෝරන්න:`, {reply_markup:{inline_keyboard:kb}});
+    }
+  }
+
+  // TV Movie Quality -> Upload
+  if(data.startsWith('tvmq_')){
     await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
     const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
-    const cached=movieCache.get(id); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න.');
-    const items=cached.csMovie?.links?.[quality]||[];
-    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
+    const cached=dlCache.get(id); if(!cached) return ctx.reply('⌛ Expired.');
+    const items=cached.links?.[quality]||[];
+    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ.`);
 
-    // cinesubz links ටික direct නිසා gateway resolve ඕන නෑ
     const dlId=createId();
     const resolved=items.map(item=>({quality:item.quality, size:item.size, gw:item.link, direct:item.link}));
     setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
 
-    // AUTO TG UPLOAD: පළවෙනි direct link එකෙන් කෙලින්ම Telegram එකට upload
+    const best = resolved[0];
+    const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} download වෙනවා...\n📦 Size: ${best.size||'Unknown'}`);
+    const result=await sendVideoFromUrl(ctx,best.direct);
+    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
+    if(result.ok) return;
+    if(result.tooBig){
+      await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
+      return;
+    }
+    await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). Links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
+    return;
+  }
+
+  if(data.startsWith('mq_')){
+    await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
+    const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
+    const cached=movieCache.get(id); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න. `film name`');
+    const items=cached.csMovie?.links?.[quality]||[];
+    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
+
+    const dlId=createId();
+    const resolved=items.map(item=>({quality:item.quality, size:item.size, gw:item.link, direct:item.link}));
+    setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
+
     const best = resolved.find(r=>r.direct);
     if(best){
-      const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} Telegram එකට download වෙනවා...\n📦 Size: ${best.size||'Unknown'}\n\nටිකක් ගන්න පුළුවන්.`);
+      const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} Telegram එකට download වෙනවා...\n📦 Size: ${best.size||'Unknown'}`);
       const result=await sendVideoFromUrl(ctx,best.direct);
       await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
       if(result.ok) return;
-
       if(result.tooBig){
         await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් ඕන එක download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
         return;
       }
-      // fail වුනොත් අනිත් links try කරන්න පුළුවන් විදිහට keyboard එක පෙන්නනවා
       await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). ඒත් links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
       return;
     }
-
     await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 Download කරන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
     return;
   }
@@ -348,7 +491,7 @@ async function handleCallback(ctx){
     const item=cached.resolved[idx];
     if(!item?.direct) return ctx.reply('❌ Link එක වැඩ කරන්නේ නෑ. Gateway link එක try කරන්න:\n'+(item?.gw||''));
 
-    const statusMsg=await ctx.reply(`⏳ ${item.quality} download වෙනවා... ටිකක් ගන්න පුළුවන්.`);
+    const statusMsg=await ctx.reply(`⏳ ${item.quality} download වෙනවා...`);
     const result=await sendVideoFromUrl(ctx,item.direct);
     await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
     if(!result.ok){
