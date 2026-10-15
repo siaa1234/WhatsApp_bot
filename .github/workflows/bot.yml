@@ -1,9 +1,9 @@
 name: Telegram Bot
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:      # Manual start button එකෙන් run කරන්න පුළුවන්
   schedule:
-    - cron: '*/5 * * * *'   # හැම 5 වෙලාවක්ම — seamless restart (concurrency එකෙන් පරණ එක cancel)
+    - cron: '*/5 * * * *' # හැම 5 වෙලාවකම restart (concurrency එකෙන් පරණ run එක cancel වෙනවා)
 
 concurrency:
   group: telegram-bot
@@ -12,7 +12,8 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 350  # GitHub max ~6 hours
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,13 +23,29 @@ jobs:
         with:
           node-version: '20'
 
+      # ---------- Optional: yt-dlp (YouTube download වලට ඕන නම් විතරක්) ----------
+      # Code එකේ yt-dlp spawn කරනවා නම් විතරක් මේ 2 steps uncomment කරන්න:
+      #
+      # - name: Setup Python
+      #   uses: actions/setup-python@v5
+      #   with:
+      #     python-version: '3.10'
+      #
+      # - name: Install yt-dlp
+      #   run: |
+      #     sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+      #     sudo chmod a+rx /usr/local/bin/yt-dlp
+      # --------------------------------------------------------------------------
+
       - name: Debug - Show files
         run: |
           pwd
           ls -la
           echo "--- checking alive.jpg ---"
-          ls -lh alive.jpg || echo "❌ alive.jpg not found in root!"
+          ls -lh alive.jpg || echo "⚠️ alive.jpg not found (optional)"
 
+      # package.json තියෙනවා නම් npm install (sinhalasub.lk + telegraf ඇතුලුව)
+      # නැත්නම් fallback: directly install packages
       - name: Install dependencies
         run: |
           if [ -f package.json ]; then
@@ -36,6 +53,12 @@ jobs:
           else
             npm install telegraf sinhalasub.lk
           fi
+
+      # package.json එකේ dependencies තියෙනවද කියලා verify
+      - name: Verify dependencies
+        run: |
+          node -e "require('telegraf'); console.log('✅ telegraf OK')" || echo "⚠️ telegraf missing"
+          node -e "require('sinhalasub.lk'); console.log('✅ sinhalasub.lk OK')" || echo "⚠️ sinhalasub.lk missing"
 
       - name: Run Bot
         env:
