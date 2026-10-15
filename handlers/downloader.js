@@ -1,14 +1,15 @@
 const fs = require('fs');
 const path = require('path');
+const { getSearch, getDetails, getDownload } = require('sinhalasub.lk');
 
 const OMDB_API = process.env.OMDB_API || '966ab6ea';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const COBALT_API_URL = process.env.COBALT_API_URL;
 const COBALT_API_KEY = process.env.COBALT_API_KEY;
 
-const MY_API_URL = 'https://raw.githubusercontent.com/hansaka56789/Moviebox_movieproAPI/main/output/api.json';
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
 const MAX_TG_SIZE = 48 * 1024 * 1024;
+const SITE_NAME = 'sinhalasub.lk';
 
 const socialCache = new Map();
 const directCache = new Map();
@@ -24,6 +25,7 @@ function fetchWithTimeout(url, options={}, ms=20000){
   return fetch(url, {...options, signal: controller.signal}).finally(()=>clearTimeout(t));
 }
 function setCache(map,id,value,ttl=600000){ map.set(id,value); setTimeout(()=>map.delete(id),ttl); }
+
 function detectPlatform(url){
   if(/(tiktok\.com)/i.test(url)) return 'tiktok';
   if(/(instagram\.com)/i.test(url)) return 'instagram';
@@ -33,18 +35,18 @@ function detectPlatform(url){
 }
 function detectDirectLink(url){
   if(/(drive\.google\.com|docs\.google\.com)/i.test(url)) return 'gdrive';
-  if(/^https?:\/\/.+/i.test(url) &&!detectPlatform(url)) return 'direct';
+  if(/^https?:\/\/.+/i.test(url) && !detectPlatform(url)) return 'direct';
   return null;
 }
 function convertGoogleDriveLink(url){
   const match = url.match(/\/d\/(.*?)\/|\?id=(.*?)(&|$)/);
-  const fileId = match? (match[1]||match[2]) : null;
+  const fileId = match ? (match[1]||match[2]) : null;
   if(fileId) return `https://drive.google.com/uc?export=download&id=${fileId}`;
   return url;
 }
 function extractYouTubeId(url){
   const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-  return m? m[1]: null;
+  return m ? m[1] : null;
 }
 async function getYouTubeMetadata(url){
   try{
@@ -83,14 +85,50 @@ function buildCaption(platform, title){
   const t=(title||'No Title').toString().replace(/_/g,' ').slice(0,80);
   return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
-async function searchMyAPI(movieName){
+
+// ===== SINHALASUB.LK SCRAPER (replaces Moviebox API / cinesubz) =====
+async function searchSinhalasub(query){
   try{
-    const res=await fetchWithTimeout(MY_API_URL);
-    const data=await res.json();
-    const movies=Array.isArray(data)?data:data.movies||data.data||[];
-    return movies.find(m=>(m.title||m.name||'').toLowerCase().includes(movieName.toLowerCase()));
-  }catch(e){return null;}
+    const res = await getSearch(query);
+    const items = res?.result || [];
+    if(!Array.isArray(items) || !items.length) return null;
+    const q = query.toLowerCase();
+    const best = items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
+    return best; // { title, url, ... }
+  }catch(e){ console.log('sinhalasub search error:', e.message); return null; }
 }
+
+async function getSinhalasubMovie(movieUrl){
+  try{
+    const res = await getDetails(movieUrl);
+    const d = res?.result || res;
+    if(!d) return null;
+    const dl = Array.isArray(d.dl_links) ? d.dl_links : [];
+    const links = { '480p':[], '720p':[], '1080p':[] };
+    for(const item of dl){
+      if(!item?.link || !item?.quality) continue;
+      if(/subtitle/i.test(item.quality)) continue;
+      const q = item.quality.match(/(480|720|1080)\s*p/i);
+      if(!q) continue;
+      const key = q[1] + 'p';
+      if(!links[key].some(x=>x.link===item.link)) links[key].push(item);
+    }
+    return {
+      title: d.title || '',
+      poster: d.img || d.poster || d.image || null,
+      url: movieUrl,
+      links
+    };
+  }catch(e){ console.log('sinhalasub details error:', e.message); return null; }
+}
+
+async function resolveGatewayLink(gwUrl){
+  try{
+    const res = await getDownload(gwUrl);
+    return res?.result || res?.url || null;
+  }catch(e){ return null; }
+}
+
 async function sendVideoFromUrl(ctx, videoLink){
   const caption='✅ Done! POWERED BY CINEMAX';
   try{await ctx.replyWithVideo(videoLink,{caption}); return{ok:true};}catch(e){}
@@ -140,7 +178,7 @@ async function handleText(ctx){
     await ctx.reply('🔗 Link එක හඳුනාගැනිණි!',{reply_markup:{inline_keyboard:[[{text:'📥 Send as Video',callback_data:`send_${id}`}]]}});return;
   }
 
-  // ===== MOVIE SEARCH - YOUR FORMAT =====
+  // ===== MOVIE SEARCH - SINHALASUB.LK =====
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try{
     let omdb={Response:'False'};
@@ -148,11 +186,13 @@ async function handleText(ctx){
       const r=await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
       omdb=await r.json();
     }
-    const myMovie=await searchMyAPI(query);
-    if(omdb.Response==='False' &&!myMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
 
-    // OMDB DATA
-    const title = omdb.Title || myMovie?.title || query;
+    const searchHit = await searchSinhalasub(query);
+    const csMovie = searchHit ? await getSinhalasubMovie(searchHit.url) : null;
+
+    if(omdb.Response==='False' && !csMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
+
+    const title = omdb.Title || csMovie?.title || query;
     const release = omdb.Released && omdb.Released!=='N/A'? omdb.Released : (omdb.Year || 'N/A');
     const duration = omdb.Runtime && omdb.Runtime!=='N/A'? omdb.Runtime : 'N/A';
     const imdb = omdb.imdbRating && omdb.imdbRating!=='N/A'? omdb.imdbRating : 'N/A';
@@ -161,12 +201,12 @@ async function handleText(ctx){
     const plot = omdb.Plot && omdb.Plot!=='N/A'? omdb.Plot : 'No description available.';
     const poster = omdb.Poster && omdb.Poster!=='N/A'? omdb.Poster : null;
 
-    const photoSource = poster || myMovie?.poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : 'https://via.placeholder.com/300x450?text=No+Poster');
+    const photoSource = poster || csMovie?.poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : null);
 
+    const hasLinks = csMovie && Object.values(csMovie.links).some(a=>a.length);
     const movieId=createId();
-    setCache(movieCache, movieId, {query,title,myMovie,omdb});
+    setCache(movieCache, movieId, {query,title,csMovie});
 
-    // YOUR EXACT FORMAT
     const caption =
 `☘️ *NAME* ☛ ${title}
 
@@ -174,28 +214,34 @@ async function handleText(ctx){
 *▫️⏱ 𝗗ᴜʀᴀᴛɪᴏɴ* ☛ ${duration}
 *▫️⭐ 𝗜𝗠𝗗𝗕* ☛ ${imdb}
 
-*▫️🎭 𝗚ᴇ𝗻𝗿𝗲𝘀* ☛ ${genres}
-*▫️🌎 𝗖𝗼𝘂𝗻𝘁𝗿𝘆* ☛ ${country}
+*▫️🎭 𝗚ᴇɴʀᴇꜱ* ☛ ${genres}
+*▫️🌎 𝗖ᴏᴜɴᴛʀʏ* ☛ ${country}
 
-*▫️📃 𝗗𝗲𝘀𝗰𝗿𝗶𝗽𝘁𝗶𝗼𝗻* ☛
+*▫️📃 𝗗ᴇꜱᴄʀɪᴘᴛɪᴏɴ* ☛
 ${plot}
 
 *➟➟➟➟➟➟➟➟*
 *▫️🔗 𝗠𝗼𝘃𝗶𝗲 SITE ♡*
-cinemaxlk.vercel.app ◇
+${SITE_NAME} ◇
 *➟➟➟➟➟➟➟➟*`;
 
-    await ctx.replyWithPhoto(photoSource, {
-      caption,
-      parse_mode:'Markdown',
-      reply_markup:{
-        inline_keyboard:[
-          [{text:'480P', callback_data:`mq_${movieId}_480p`}, {text:'720P', callback_data:`mq_${movieId}_720p`}],
-          [{text:'1080P', callback_data:`mq_${movieId}_1080p`}],
-          [{text:'🌐 Visit Site', url:'https://cinemaxlk.vercel.app'}]
-        ]
-      }
-    });
+    const kb=[];
+    if(hasLinks){
+      const q480=csMovie.links['480p'].length, q720=csMovie.links['720p'].length, q1080=csMovie.links['1080p'].length;
+      const row=[];
+      if(q480) row.push({text:'480P', callback_data:`mq_${movieId}_480p`});
+      if(q720) row.push({text:'720P', callback_data:`mq_${movieId}_720p`});
+      if(row.length) kb.push(row);
+      if(q1080) kb.push([{text:'1080P', callback_data:`mq_${movieId}_1080p`}]);
+    }
+    kb.push([{text:'🌐 Visit Site', url: csMovie?.url || `https://${SITE_NAME}`}]);
+
+    if(photoSource){
+      try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+      catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
+    }else{
+      await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
+    }
 
   }catch(e){ console.log('Movie search error', e.message); ctx.reply('❌ Error එකක් ආවා.'); }
 }
@@ -228,16 +274,39 @@ async function handleCallback(ctx){
     const statusMsg=await ctx.reply('⏳ Uploading...');
     const result=await sendVideoFromUrl(ctx,cached.url);
     await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-    if(!result.ok) return ctx.reply('❌ Fail.'); return;
+    if(!result.ok) return ctx.reply('❌ Fail.');
+    await ctx.reply('✅ Done! POWERED BY CINEMAX');
+    return;
   }
   if(data.startsWith('mq_')){
-    await ctx.answerCbQuery().catch(()=>{});
+    await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
     const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
-    const cached=movieCache.get(id); if(!cached) return ctx.reply('⌛ Expired.');
-    const fileLink=cached.myMovie?.[quality]||cached.myMovie?.links?.[quality]||cached.myMovie?.downloadUrl;
-    if(fileLink){
-      await ctx.reply(`✅ ${cached.title} - ${quality} Ready!\n\n🔗 ${fileLink}`,{reply_markup:{inline_keyboard:[[{text:`📥 Download ${quality}`,url:fileLink}]]}});
-    }else{ await ctx.reply(`❌ ${quality} නෑ. Site එකේ බලන්න:\nhttps://cinemaxlk.vercel.app`); }
+    const cached=movieCache.get(id); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න.');
+    const items=cached.csMovie?.links?.[quality]||[];
+    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
+
+    // Resolve gateway links (sinhalasub.lk/links/xxx -> direct)
+    const resolved=[];
+    for(const item of items){
+      const direct=await resolveGatewayLink(item.link);
+      resolved.push({quality:item.quality, size:item.size, gw:item.link, direct});
+    }
+
+    const kb=[];
+    const lines=[];
+    resolved.forEach((r,i)=>{
+      const label=`${r.quality}${r.size?` • ${r.size}`:''}`;
+      if(r.direct){
+        kb.push([{text:`📥 ${label}`, url:r.direct}]);
+        lines.push(`${label}: ${r.direct}`);
+      }else{
+        // gateway resolve fail -> open gateway link
+        kb.push([{text:`🔗 ${label}`, url:r.gw}]);
+        lines.push(`${label}: ${r.gw}`);
+      }
+    });
+
+    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 පහල Button එකෙන් Download කරන්න`,{reply_markup:{inline_keyboard:kb}});
     return;
   }
 }
