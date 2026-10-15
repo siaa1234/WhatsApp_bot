@@ -177,6 +177,18 @@ async function sendVideoFromUrl(ctx, videoLink){
   }catch(err){return{ok:false,error:err.message};}
 }
 
+function buildDlKeyboard(dlId, resolved){
+  const kb=[];
+  resolved.forEach((r,i)=>{
+    const label=`${r.quality}${r.size?` • ${r.size}`:''}`;
+    const row=[];
+    if(r.direct) row.push({text:`📥 ${label} (TG)`, callback_data:`mdt_${dlId}_${i}`});
+    row.push({text:`🔗 ${label}`, url:r.direct || r.gw});
+    kb.push(row);
+  });
+  return kb;
+}
+
 // ===== TEXT HANDLER =====
 async function handleText(ctx){
   const query=ctx.message.text?.trim();
@@ -334,7 +346,7 @@ async function handleCallback(ctx){
     const items=cached.csMovie?.links?.[quality]||[];
     if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
 
-    // resolve gateway links -> direct (cinesubz fallback එකෙන් ආවා නම් already direct)
+    // resolve all gateway links -> direct (cinesubz fallback එකෙන් ආවා නම් already direct)
     const dlId=createId();
     const resolved=[];
     for(const item of items){
@@ -343,16 +355,24 @@ async function handleCallback(ctx){
     }
     setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
 
-    const kb=[];
-    resolved.forEach((r,i)=>{
-      const label=`${r.quality}${r.size?` • ${r.size}`:''}`;
-      const row=[];
-      if(r.direct) row.push({text:`📥 ${label} (TG)`, callback_data:`mdt_${dlId}_${i}`});
-      row.push({text:`🔗 ${label}`, url:r.direct || r.gw});
-      kb.push(row);
-    });
+    // AUTO TG DOWNLOAD: first working direct link එකෙන් කෙලින්ම upload කරනවා
+    const best = resolved.find(r=>r.direct);
+    if(best){
+      const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} Telegram එකට download වෙනවා...\n📦 Size: ${best.size||'Unknown'}\n\nටිකක් ගන්න පුළුවන්.`);
+      const result=await sendVideoFromUrl(ctx,best.direct);
+      await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
+      if(result.ok) return;
 
-    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n📥 TG = Telegram ඇතුලේ download වෙනවා (limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB)\n🔗 = Direct download link`,{reply_markup:{inline_keyboard:kb}});
+      if(result.tooBig){
+        await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් ඕන එක download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
+        return;
+      }
+      await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). ඒත් links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
+      return;
+    }
+
+    // no direct links resolved -> show gateway/direct url buttons
+    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 Download කරන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
     return;
   }
 
