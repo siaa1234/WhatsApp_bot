@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getSearch, getDetails, getDownload } = require('sinhalasub.lk');
-const { CineSubz } = require('@sl-code-lords/movie-api');
+const { SinhalaSub } = require('@sl-code-lords/movie-api');
 
 const OMDB_API = process.env.OMDB_API || '966ab6ea';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
@@ -90,7 +90,7 @@ function buildCaption(platform, title){
   return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
 
-// ===== SINHALASUB.LK =====
+// ===== SINHALASUB.LK (npm: sinhalasub.lk) =====
 async function searchSinhalasub(query){
   try{
     const res = await getSearch(query);
@@ -117,7 +117,7 @@ async function getSinhalasubMovie(movieUrl){
       const key = q[1] + 'p';
       if(!links[key].some(x=>x.link===item.link)) links[key].push(item);
     }
-    return { title: d.title || '', poster: d.img || d.poster || d.image || null, url: movieUrl, links };
+    return { title: d.title || '', poster: d.img || d.poster || d.image || null, url: movieUrl, links, noGateway: false };
   }catch(e){ console.log('sinhalasub details error:', e.message); return null; }
 }
 
@@ -129,10 +129,11 @@ async function resolveGatewayLink(gwUrl){
   }catch(e){ return null; }
 }
 
-// ===== CINESUBZ FALLBACK (@sl-code-lords/movie-api) =====
+// ===== FALLBACK: @sl-code-lords/movie-api (direct links, no gateway resolve needed) =====
 async function searchCinesubz(query){
   try{
-    const items = await CineSubz.get_list.by_search(query);
+    const res = await SinhalaSub.get_list.by_search(query);
+    const items = res?.result || res;
     if(!Array.isArray(items) || !items.length) return null;
     const q = query.toLowerCase();
     return items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
@@ -141,9 +142,10 @@ async function searchCinesubz(query){
 
 async function getCinesubzMovie(movieUrl){
   try{
-    const d = await CineSubz.movie(movieUrl);
+    const res = await SinhalaSub.movie(movieUrl);
+    const d = res?.result || res;
     if(!d) return null;
-    const dl = Array.isArray(d.dl_links) ? d.dl_links : (Array.isArray(d.filmlinks) ? d.filmlinks : []);
+    const dl = Array.isArray(d.dl_links) ? d.dl_links : [];
     const links = { '480p':[], '720p':[], '1080p':[] };
     for(const item of dl){
       const link = item?.link || item?.url;
@@ -155,7 +157,7 @@ async function getCinesubzMovie(movieUrl){
       const key = q[1] + 'p';
       if(!links[key].some(x=>x.link===link)) links[key].push({quality, size:item?.size||'', link});
     }
-    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links };
+    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links, noGateway: true };
   }catch(e){ console.log('cinesubz details error:', e.message); return null; }
 }
 
@@ -224,7 +226,7 @@ async function handleText(ctx){
     let searchHit = await searchSinhalasub(query);
     let csMovie = searchHit ? await getSinhalasubMovie(searchHit.url) : null;
 
-    // fallback: cinesubz
+    // fallback: @sl-code-lords/movie-api
     if(!csMovie || !Object.values(csMovie.links).some(a=>a.length)){
       const csHit = await searchCinesubz(query);
       if(csHit?.url){
@@ -332,11 +334,11 @@ async function handleCallback(ctx){
     const items=cached.csMovie?.links?.[quality]||[];
     if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
 
-    // resolve gateway links -> direct links
+    // resolve gateway links -> direct (cinesubz fallback එකෙන් ආවා නම් already direct)
     const dlId=createId();
     const resolved=[];
     for(const item of items){
-      const direct=await resolveGatewayLink(item.link);
+      const direct = cached.csMovie.noGateway ? item.link : await resolveGatewayLink(item.link);
       resolved.push({quality:item.quality, size:item.size, gw:item.link, direct});
     }
     setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
