@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "telegraf": "^4.16.3",
-    "sinhalasub.lk": "^12.0.0-beta.0"
+    "sinhalasub.lk": "^12.0.0-beta.0",
+    "@sl-code-lords/movie-api": "^9.0.0"
   }
 }
