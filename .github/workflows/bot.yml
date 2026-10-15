@@ -3,12 +3,12 @@ name: Telegram Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'   # 5 පැයකට සැරයක් restart (6h runner limit එකට කලින්)
+    - cron: '0 */5 * * *'
 
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 290    # 6h limit ට කලින් නවත්වන්න
+    timeout-minutes: 290
 
     steps:
       - uses: actions/checkout@v4
@@ -17,12 +17,17 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install ffmpeg and yt-dlp
+      - name: Install ffmpeg, deno and latest yt-dlp
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          # apt yt-dlp version එක පරණ නිසා latest release එක direct download කරනවා
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
+          # YouTube JS challenge වලට deno runtime එක ඕන
+          curl -fsSL https://deno.land/install.sh | sudo DENO_INSTALL=/usr/local sh
+          yt-dlp --version
+          deno --version
 
       - name: Install dependencies
         run: npm install
@@ -31,5 +36,5 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OMDB_API: ${{ secrets.OMDB_API }}
-          LOCAL_BOT_API: ${{ secrets.LOCAL_BOT_API }}
+          YT_COOKIES_B64: ${{ secrets.YT_COOKIES_B64 }}
         run: node index.js
