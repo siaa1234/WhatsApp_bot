@@ -1,9 +1,9 @@
 name: Telegram Bot
 
 on:
-  workflow_dispatch:      # Manual start
+  workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *' # හැම 5 min වෙලාවක restart (seamless)
+    - cron: '*/5 * * * *'
 
 concurrency:
   group: telegram-bot
@@ -13,6 +13,15 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+
+    services:
+      telegram-bot-api:
+        image: aiogram/telegram-bot-api:latest
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        ports:
+          - 8081:8081
 
     steps:
       - name: Checkout
@@ -27,8 +36,6 @@ jobs:
         run: |
           pwd
           ls -la
-          echo "--- checking alive.jpg ---"
-          ls -lh alive.jpg || echo "⚠️ alive.jpg not found (optional)"
 
       - name: Install dependencies
         run: |
@@ -37,19 +44,19 @@ jobs:
           else
             npm init -y
           fi
-          # Critical packages අනිවාර්යයෙන්ම install වෙනවා (package.json එකේ තියෙන්නත් ඕන)
           npm install telegraf@^4.16.3 sinhalasub.lk@latest @sl-code-lords/movie-api@latest
 
       - name: Verify dependencies
         run: |
           node -e "require('telegraf'); console.log('✅ telegraf OK')" || echo "⚠️ telegraf missing"
-          node -e "require('sinhalasub.lk'); console.log('✅ sinhalasub.lk OK')" || echo "⚠️ sinhalasub.lk missing"
+          node -e "require('sinhalasub.lk'); console.log('✅ sinhalasub.lk OK')" || echo "⚠️ sinhalasub.local OK"
           node -e "require('@sl-code-lords/movie-api'); console.log('✅ movie-api OK')" || echo "⚠️ movie-api missing"
 
       - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OMDB_API: ${{ secrets.OMDB_API }}
+          LOCAL_BOT_API: http://localhost:8081
         run: |
           if [ -f index.js ]; then
             node index.js
