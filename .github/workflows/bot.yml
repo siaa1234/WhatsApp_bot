@@ -3,64 +3,33 @@ name: Telegram Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
-
-concurrency:
-  group: telegram-bot
-  cancel-in-progress: true
+    - cron: '0 */5 * * *'   # 5 පැයකට සැරයක් restart (6h runner limit එකට කලින්)
 
 jobs:
-  run-bot:
+  bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
-
-    services:
-      telegram-bot-api:
-        image: aiogram/telegram-bot-api:latest
-        env:
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-        ports:
-          - 8081:8081
+    timeout-minutes: 290    # 6h limit ට කලින් නවත්වන්න
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Debug - Show files
+      - name: Install ffmpeg and yt-dlp
         run: |
-          pwd
-          ls -la
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
 
       - name: Install dependencies
-        run: |
-          if [ -f package.json ]; then
-            npm install
-          else
-            npm init -y
-          fi
-          npm install telegraf@^4.16.3 sinhalasub.lk@latest @sl-code-lords/movie-api@latest
+        run: npm install
 
-      - name: Verify dependencies
-        run: |
-          node -e "require('telegraf'); console.log('✅ telegraf OK')" || echo "⚠️ telegraf missing"
-          node -e "require('sinhalasub.lk'); console.log('✅ sinhalasub.lk OK')" || echo "⚠️ sinhalasub.local OK"
-          node -e "require('@sl-code-lords/movie-api'); console.log('✅ movie-api OK')" || echo "⚠️ movie-api missing"
-
-      - name: Run Bot
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           OMDB_API: ${{ secrets.OMDB_API }}
-          LOCAL_BOT_API: http://localhost:8081
-        run: |
-          if [ -f index.js ]; then
-            node index.js
-          else
-            echo "❌ index.js එක repo එකේ හම්බුනේ නෑ!"
-            exit 1
-          fi
+          LOCAL_BOT_API: ${{ secrets.LOCAL_BOT_API }}
+        run: node index.js
