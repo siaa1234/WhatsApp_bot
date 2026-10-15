@@ -1,19 +1,23 @@
 const fs = require('fs');
 const path = require('path');
 const { getSearch, getDetails, getDownload } = require('sinhalasub.lk');
+const { CineSubz } = require('@sl-code-lords/movie-api');
 
 const OMDB_API = process.env.OMDB_API || '966ab6ea';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const COBALT_API_URL = process.env.COBALT_API_URL;
 const COBALT_API_KEY = process.env.COBALT_API_KEY;
+const LOCAL_BOT_API = process.env.LOCAL_BOT_API || ''; // e.g. http://localhost:8081
 
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
-const MAX_TG_SIZE = 48 * 1024 * 1024;
+// Local Bot API server එකක් නම් 2GB වෙනක් upload කරන්න පුළුවන්
+const MAX_TG_SIZE = LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
 const SITE_NAME = 'sinhalasub.lk';
 
 const socialCache = new Map();
 const directCache = new Map();
 const movieCache = new Map();
+const dlCache = new Map();
 
 const COBALT_INSTANCES = [COBALT_API_URL, 'https://api.cobalt.tools/'].filter(Boolean);
 
@@ -86,7 +90,7 @@ function buildCaption(platform, title){
   return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
 
-// ===== SINHALASUB.LK SCRAPER (replaces Moviebox API / cinesubz) =====
+// ===== SINHALASUB.LK =====
 async function searchSinhalasub(query){
   try{
     const res = await getSearch(query);
@@ -94,7 +98,7 @@ async function searchSinhalasub(query){
     if(!Array.isArray(items) || !items.length) return null;
     const q = query.toLowerCase();
     const best = items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
-    return best; // { title, url, ... }
+    return best;
   }catch(e){ console.log('sinhalasub search error:', e.message); return null; }
 }
 
@@ -113,30 +117,57 @@ async function getSinhalasubMovie(movieUrl){
       const key = q[1] + 'p';
       if(!links[key].some(x=>x.link===item.link)) links[key].push(item);
     }
-    return {
-      title: d.title || '',
-      poster: d.img || d.poster || d.image || null,
-      url: movieUrl,
-      links
-    };
+    return { title: d.title || '', poster: d.img || d.poster || d.image || null, url: movieUrl, links };
   }catch(e){ console.log('sinhalasub details error:', e.message); return null; }
 }
 
 async function resolveGatewayLink(gwUrl){
   try{
     const res = await getDownload(gwUrl);
-    return res?.result || res?.url || null;
+    const d = res?.result || res;
+    return d?.link || d?.url || d?.download_link || (typeof res === 'string' ? res : null);
   }catch(e){ return null; }
 }
 
+// ===== CINESUBZ FALLBACK (@sl-code-lords/movie-api) =====
+async function searchCinesubz(query){
+  try{
+    const items = await CineSubz.get_list.by_search(query);
+    if(!Array.isArray(items) || !items.length) return null;
+    const q = query.toLowerCase();
+    return items.find(m => (m.title||'').toLowerCase().includes(q)) || items[0];
+  }catch(e){ console.log('cinesubz search error:', e.message); return null; }
+}
+
+async function getCinesubzMovie(movieUrl){
+  try{
+    const d = await CineSubz.movie(movieUrl);
+    if(!d) return null;
+    const dl = Array.isArray(d.dl_links) ? d.dl_links : (Array.isArray(d.filmlinks) ? d.filmlinks : []);
+    const links = { '480p':[], '720p':[], '1080p':[] };
+    for(const item of dl){
+      const link = item?.link || item?.url;
+      const quality = item?.quality || item?.label;
+      if(!link || !quality) continue;
+      if(/subtitle/i.test(quality)) continue;
+      const q = quality.match(/(480|720|1080)\s*p/i);
+      if(!q) continue;
+      const key = q[1] + 'p';
+      if(!links[key].some(x=>x.link===link)) links[key].push({quality, size:item?.size||'', link});
+    }
+    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links };
+  }catch(e){ console.log('cinesubz details error:', e.message); return null; }
+}
+
+// ===== VIDEO SEND =====
 async function sendVideoFromUrl(ctx, videoLink){
   const caption='✅ Done! POWERED BY CINEMAX';
-  try{await ctx.replyWithVideo(videoLink,{caption}); return{ok:true};}catch(e){}
+  try{ await ctx.replyWithVideo(videoLink,{caption}); return{ok:true}; }catch(e){}
   try{
-    const res=await fetchWithTimeout(videoLink,{},120000);
+    const res=await fetchWithTimeout(videoLink,{},600000);
     if(!res.ok) throw new Error(`fetch failed: ${res.status}`);
     const len=Number(res.headers.get('content-length')||0);
-    if(len>MAX_TG_SIZE) return{ok:false,tooBig:true,size:len};
+    if(len && len>MAX_TG_SIZE) return{ok:false,tooBig:true,size:len};
     const buf=await res.arrayBuffer();
     if(buf.byteLength>MAX_TG_SIZE) return{ok:false,tooBig:true,size:buf.byteLength};
     await ctx.replyWithVideo({source:Buffer.from(buf),filename:'video.mp4'},{caption});
@@ -144,6 +175,7 @@ async function sendVideoFromUrl(ctx, videoLink){
   }catch(err){return{ok:false,error:err.message};}
 }
 
+// ===== TEXT HANDLER =====
 async function handleText(ctx){
   const query=ctx.message.text?.trim();
   if(!query||query.startsWith('/')) return;
@@ -178,17 +210,28 @@ async function handleText(ctx){
     await ctx.reply('🔗 Link එක හඳුනාගැනිණි!',{reply_markup:{inline_keyboard:[[{text:'📥 Send as Video',callback_data:`send_${id}`}]]}});return;
   }
 
-  // ===== MOVIE SEARCH - SINHALASUB.LK =====
+  // ===== MOVIE SEARCH - SINHALASUB.LK + CINESUBZ FALLBACK =====
   await ctx.reply(`🔍 "${query}" හොයනවා...`);
   try{
     let omdb={Response:'False'};
     if(OMDB_API){
-      const r=await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
-      omdb=await r.json();
+      try{
+        const r=await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
+        omdb=await r.json();
+      }catch(e){}
     }
 
-    const searchHit = await searchSinhalasub(query);
-    const csMovie = searchHit ? await getSinhalasubMovie(searchHit.url) : null;
+    let searchHit = await searchSinhalasub(query);
+    let csMovie = searchHit ? await getSinhalasubMovie(searchHit.url) : null;
+
+    // fallback: cinesubz
+    if(!csMovie || !Object.values(csMovie.links).some(a=>a.length)){
+      const csHit = await searchCinesubz(query);
+      if(csHit?.url){
+        const csAlt = await getCinesubzMovie(csHit.url);
+        if(csAlt && Object.values(csAlt.links).some(a=>a.length)) csMovie = csAlt;
+      }
+    }
 
     if(omdb.Response==='False' && !csMovie) return ctx.reply('❌ Film එක හම්බුනේ නෑ');
 
@@ -246,8 +289,10 @@ ${SITE_NAME} ◇
   }catch(e){ console.log('Movie search error', e.message); ctx.reply('❌ Error එකක් ආවා.'); }
 }
 
+// ===== CALLBACK HANDLER =====
 async function handleCallback(ctx){
   const data=ctx.callbackQuery.data;
+
   if(data.startsWith('soc_')){
     await ctx.answerCbQuery('⏳ Downloading...').catch(()=>{});
     const parts=data.split('_'); const id=parts[1]; const q=parts[2];
@@ -263,11 +308,12 @@ async function handleCallback(ctx){
     const result=await sendVideoFromUrl(ctx,videoLink);
     await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
     if(!result.ok){
-      if(result.tooBig) return ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB). Limit 50MB.\n\nDirect Link:\n${videoLink}`);
+      if(result.tooBig) return ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB). Limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\nDirect Link:\n${videoLink}`);
       return ctx.reply(`❌ Upload Fail. Link:\n${videoLink}`);
     }
     return;
   }
+
   if(data.startsWith('send_')){
     await ctx.answerCbQuery('⏳ Downloading...').catch(()=>{});
     const id=data.split('_')[1]; const cached=directCache.get(id); if(!cached) return ctx.reply('⌛ Expired.');
@@ -278,6 +324,7 @@ async function handleCallback(ctx){
     await ctx.reply('✅ Done! POWERED BY CINEMAX');
     return;
   }
+
   if(data.startsWith('mq_')){
     await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
     const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
@@ -285,28 +332,44 @@ async function handleCallback(ctx){
     const items=cached.csMovie?.links?.[quality]||[];
     if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
 
-    // Resolve gateway links (sinhalasub.lk/links/xxx -> direct)
+    // resolve gateway links -> direct links
+    const dlId=createId();
     const resolved=[];
     for(const item of items){
       const direct=await resolveGatewayLink(item.link);
       resolved.push({quality:item.quality, size:item.size, gw:item.link, direct});
     }
+    setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
 
     const kb=[];
-    const lines=[];
     resolved.forEach((r,i)=>{
       const label=`${r.quality}${r.size?` • ${r.size}`:''}`;
-      if(r.direct){
-        kb.push([{text:`📥 ${label}`, url:r.direct}]);
-        lines.push(`${label}: ${r.direct}`);
-      }else{
-        // gateway resolve fail -> open gateway link
-        kb.push([{text:`🔗 ${label}`, url:r.gw}]);
-        lines.push(`${label}: ${r.gw}`);
-      }
+      const row=[];
+      if(r.direct) row.push({text:`📥 ${label} (TG)`, callback_data:`mdt_${dlId}_${i}`});
+      row.push({text:`🔗 ${label}`, url:r.direct || r.gw});
+      kb.push(row);
     });
 
-    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 පහල Button එකෙන් Download කරන්න`,{reply_markup:{inline_keyboard:kb}});
+    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n📥 TG = Telegram ඇතුලේ download වෙනවා (limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB)\n🔗 = Direct download link`,{reply_markup:{inline_keyboard:kb}});
+    return;
+  }
+
+  if(data.startsWith('mdt_')){
+    await ctx.answerCbQuery('⏳ Downloading to Telegram...').catch(()=>{});
+    const parts=data.split('_'); const dlId=parts[1]; const idx=parseInt(parts[2]);
+    const cached=dlCache.get(dlId); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න.');
+    const item=cached.resolved[idx];
+    if(!item?.direct) return ctx.reply('❌ Link එක වැඩ කරන්නේ නෑ. Gateway link එක try කරන්න:\n'+(item?.gw||''));
+
+    const statusMsg=await ctx.reply(`⏳ ${item.quality} download වෙනවා... ටිකක් ගන්න පුළුවන්.`);
+    const result=await sendVideoFromUrl(ctx,item.direct);
+    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
+    if(!result.ok){
+      if(result.tooBig){
+        return ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB). Bot limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\nDirect Link:\n${item.direct}`);
+      }
+      return ctx.reply(`❌ Upload Fail.\n\nDirect Link:\n${item.direct}\n\nGateway:\n${item.gw}`);
+    }
     return;
   }
 }
