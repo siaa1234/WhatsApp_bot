@@ -3,7 +3,7 @@ name: Telegram Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'
+    - cron: '*/5 * * * *'   # හැම 5 වෙලාවක්ම — seamless restart (concurrency එකෙන් පරණ එක cancel)
 
 concurrency:
   group: telegram-bot
@@ -22,16 +22,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Setup Python (Required for yt-dlp)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install yt-dlp globally
-        run: |
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-
       - name: Debug - Show files
         run: |
           pwd
@@ -44,7 +34,7 @@ jobs:
           if [ -f package.json ]; then
             npm install
           else
-            npm install telegraf youtube-dl-exec
+            npm install telegraf sinhalasub.lk
           fi
 
       - name: Run Bot
