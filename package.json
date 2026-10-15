@@ -1,16 +1,13 @@
 {
-  "name": "telegram-multipurpose-bot",
-  "version": "6.0.0",
-  "description": "Multifunctional Telegram bot for movie search, social media, and YouTube downloads",
-  "main": "bot.js",
-  "scripts": {
-    "start": "node bot.js"
-  },
+  "name": "whatsapp-bot",
+  "version": "1.0.0",
+  "main": "index.js",
   "dependencies": {
-    "btch-downloader": "^1.0.0",
-    "telegraf": "^4.16.3"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "@whiskeysockets/baileys": "^6.7.8",
+    "pino": "^9.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "sinhalasub.lk": "^12.0.0-beta.0",
+    "awesome-phonenumber": "^7.2.0",
+    "chalk": "^5.3.0"
   }
 }
