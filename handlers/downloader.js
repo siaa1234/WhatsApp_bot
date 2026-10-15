@@ -1,507 +1,735 @@
+
 const fs = require('fs');
 const path = require('path');
-const { SinhalaSub } = require('@sl-code-lords/movie-api');
 
-const OMDB_API = process.env.OMDB_API || '966ab6ea';
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-const COBALT_API_URL = process.env.COBALT_API_URL;
-const COBALT_API_KEY = process.env.COBALT_API_KEY;
-const LOCAL_BOT_API = process.env.LOCAL_BOT_API || '';
+const OMDB_API = process.env.OMDB_API || '';
+const MOVIE_API_URL =
+  process.env.MOVIE_API_URL ||
+  'https://raw.githubusercontent.com/siaa1234/cineflix/main/cinesubz.json';
 
-const MY_API_URL = "https://raw.githubusercontent.com/siaa1234/cineflix/main/cinesubz.json";
+const MAX_TG_SIZE = process.env.LOCAL_BOT_API
+  ? 1900 * 1024 * 1024
+  : 48 * 1024 * 1024;
 
 const ALIVE_LOCAL_PATH = path.join(__dirname, '..', 'alive.jpg');
-const MAX_TG_SIZE = LOCAL_BOT_API? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
-const SITE_NAME = 'cinesubz.co';
 
-const socialCache = new Map();
-const directCache = new Map();
 const movieCache = new Map();
-const tvCache = new Map();
 const dlCache = new Map();
+const catalogCache = { data: null, time: 0 };
 
-const COBALT_INSTANCES = [COBALT_API_URL, 'https://api.cobalt.tools/'].filter(Boolean);
+function createId() {
+  return Date.now().toString(36) +
+    Math.random().toString(36).slice(2, 7);
+}
 
-function createId(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
-function esc(s){ return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function fetchWithTimeout(url, options={}, ms=20000){
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function fetchTimeout(url, options = {}, ms = 20000) {
   const controller = new AbortController();
-  const t = setTimeout(()=>controller.abort(), ms);
-  return fetch(url, {...options, signal: controller.signal}).finally(()=>clearTimeout(t));
-}
-function setCache(map,id,value,ttl=600000){ map.set(id,value); setTimeout(()=>map.delete(id),ttl); }
+  const timer = setTimeout(() => controller.abort(), ms);
 
-// ===== YOUR API =====
-async function fetchMyApi(){
-  try{
-    const r = await fetchWithTimeout(MY_API_URL, {}, 15000);
-    const j = await r.json();
-    // ඔයාගේ json එක { latest: [...] } format එකේ
-    if(j.latest && Array.isArray(j.latest)) return j.latest;
-    if(Array.isArray(j)) return j;
-    return [];
-  }catch(e){ console.log("MY API Error", e.message); return []; }
-}
-
-async function searchMyApi(query){
-  const all = await fetchMyApi();
-  if(!all.length) return null;
-  const q = query.toLowerCase();
-  // title එක ඇතුලේ query එක තියෙන එක හොයනවා
-  let found = all.filter(m => (m.title||'').toLowerCase().includes(q));
-  // exact match එකට priority
-  found.sort((a,b) => {
-    const at = a.title.toLowerCase(), bt = b.title.toLowerCase();
-    if(at === q) return -1;
-    if(bt === q) return 1;
-    return 0;
-  });
-  return found.length? found[0] : null;
-}
-
-// ===== PLATFORM DETECT =====
-function detectPlatform(url){
-  if(/(tiktok\.com)/i.test(url)) return 'tiktok';
-  if(/(instagram\.com)/i.test(url)) return 'instagram';
-  if(/(facebook\.com|fb\.watch|fb\.me)/i.test(url)) return 'facebook';
-  if(/(youtube\.com|youtu\.be)/i.test(url)) return 'youtube';
-  return null;
-}
-function detectDirectLink(url){
-  if(/(drive\.google\.com|docs\.google\.com)/i.test(url)) return 'gdrive';
-  if(/^https?:\/\/.+/i.test(url) &&!detectPlatform(url)) return 'direct';
-  return null;
-}
-function convertGoogleDriveLink(url){
-  const match = url.match(/\/d\/(.*?)\/|\?id=(.*?)(&|$)/);
-  const fileId = match? (match[1]||match[2]) : null;
-  if(fileId) return `https://drive.google.com/uc?export=download&id=${fileId}`;
-  return url;
-}
-function extractYouTubeId(url){
-  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|shorts\/|watch\?v=|watch\?.+&v=))([\w-]{11})/);
-  return m? m[1] : null;
-}
-async function getYouTubeMetadata(url){
-  try{
-    if(!YOUTUBE_API_KEY) return null;
-    const id = extractYouTubeId(url); if(!id) return null;
-    const res = await fetchWithTimeout(`https://www.googleapis.com/youtube/v3/videos?part=snippet,statistics&id=${id}&key=${YOUTUBE_API_KEY}`);
-    const data = await res.json(); if(!data.items?.length) return null;
-    const item = data.items[0];
-    return { title:item.snippet.title, author:item.snippet.channelTitle, views:item.statistics?.viewCount||'N/A', date:item.snippet.publishedAt?.split('T')[0]||'N/A', thumb:item.snippet.thumbnails?.high?.url||null, url };
-  }catch(e){ return null; }
-}
-async function getCobaltDownloadLink(url, quality='720'){
-  if(!COBALT_INSTANCES.length) return null;
-  for(const apiUrl of COBALT_INSTANCES){
-    try{
-      const headers={Accept:'application/json','Content-Type':'application/json'};
-      if(COBALT_API_KEY) headers['Authorization']=`Api-Key ${COBALT_API_KEY}`;
-      const res = await fetchWithTimeout(apiUrl,{method:'POST',headers,body:JSON.stringify({url,videoQuality:String(quality),youtubeVideoCodec:'h264',filenameStyle:'basic'})});
-      const data=await res.json();
-      if(data.status==='error') continue;
-      if((data.status==='tunnel'||data.status==='redirect')&&data.url) return data.url;
-      if(data.status==='picker'&&data.picker?.length){
-        const v=data.picker.find(p=>p.type==='video')||data.picker[0];
-        if(v?.url) return v.url;
-      }
-    }catch(e){}
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timer);
   }
-  return null;
-}
-async function fetchSocialMediaVideo(url, platform){
-  const link = await getCobaltDownloadLink(url,'720');
-  if(link) return {url:link, title:`${platform.toUpperCase()} Video`, thumb:null};
-  return null;
-}
-function buildCaption(platform, title){
-  const t=(title||'No Title').toString().replace(/_/g,' ').slice(0,80);
-  return `🟨🟥 ${platform.toUpperCase()} DOWNLOADER 🟥🟨\n\n🟡 Title: ${t}\n🔴 Powered By Cinemax\n\n⬇️ Ready to Download!`;
 }
 
-// ===== CINESUBZ DETAILS =====
-async function getCinesubzMovie(movieUrl){
-  try{
-    const res = await SinhalaSub.movie(movieUrl);
-    const d = res?.result || res;
-    if(!d) return null;
-    const dl = Array.isArray(d.dl_links)? d.dl_links : [];
-    const links = { '480p':[], '720p':[], '1080p':[] };
-    let episodes = []; // TV Series වලට
+function cacheSet(map, id, value, ttl = 1800000) {
+  map.set(id, value);
+  setTimeout(() => map.delete(id), ttl).unref?.();
+}
 
-    for(const item of dl){
-      const link = item?.link || item?.url;
-      const qualityLabel = item?.quality || item?.label || '';
-      const epName = item?.episode || item?.title || qualityLabel;
-      if(!link) continue;
-      if(/subtitle/i.test(qualityLabel) &&!/episode/i.test(qualityLabel)) continue;
+function norm(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+}
 
-      // Episode detect කරන logic
-      let epMatch = epName.match(/(?:E|Episode)\s*0*(\d+)/i) || qualityLabel.match(/S\d+\s*E0*(\d+)/i);
-      let epNum = epMatch? parseInt(epMatch[1]) : null;
+function getTitle(item) {
+  if (typeof item === 'string') return item;
 
-      // Quality detect
-      const q = qualityLabel.match(/(480|720|1080)\s*p/i);
-      const key = q? q[1]+'p' : '720p';
+  return String(
+    item?.title ||
+    item?.name ||
+    item?.series_name ||
+    item?.movie_name ||
+    item?.original_title ||
+    ''
+  );
+}
 
-      if(epNum){ // TV Series
-        let ep = episodes.find(e => e.num === epNum);
-        if(!ep){ ep = { num: epNum, title: `Episode ${epNum}`, links: {'480p':[], '720p':[], '1080p':[]} }; episodes.push(ep); }
-        ep.links[key].push({quality: qualityLabel, size:item?.size||'', link});
-      }else{
-        if(!links[key].some(x=>x.link===link)) links[key].push({quality: qualityLabel, size:item?.size||'', link, epName});
+function getUrl(value) {
+  if (typeof value === 'string') {
+    return /^https?:\/\//i.test(value) ? value : '';
+  }
+
+  if (value && typeof value === 'object') {
+    return getUrl(
+      value.url ||
+      value.link ||
+      value.download_url ||
+      value.download ||
+      value.file
+    );
+  }
+
+  return '';
+}
+
+function getQuality(value) {
+  const text = String(
+    value?.quality ||
+    value?.label ||
+    value?.resolution ||
+    value?.name ||
+    ''
+  );
+
+  const match = text.match(/(480|720|1080)\s*p?/i);
+  return match ? `${match[1]}p` : '';
+}
+
+/*
+ * API compatibility layer.
+ *
+ * Recognizes common movie/series arrays and download-link formats.
+ * If your JSON uses a different schema, adapt this function.
+ */
+
+function findLinkObject(item) {
+  const output = {};
+
+  function walk(obj, depth = 0) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return;
+
+    if (Array.isArray(obj)) {
+      for (const child of obj) walk(child, depth + 1);
+      return;
+    }
+
+    for (const [key, value] of Object.entries(obj)) {
+      const match = key.match(/^(480|720|1080)\s*p?$/i);
+
+      if (match) {
+        const quality = `${match[1]}p`;
+        const url = getUrl(value);
+
+        if (url) output[quality] ||= [];
+        if (url && !output[quality].some(x => x.url === url)) {
+          output[quality].push({ quality, url });
+        }
+      } else if (
+        typeof value === 'string' &&
+        /^(480|720|1080)p$/i.test(key)
+      ) {
+        const quality = key.toLowerCase();
+        if (/^https?:\/\//i.test(value)) {
+          output[quality] ||= [];
+          output[quality].push({ quality, url: value });
+        }
+      }
+
+      if (
+        /download.?links?|links|downloads|qualities|sources|files/i.test(key) &&
+        Array.isArray(value)
+      ) {
+        for (const entry of value) {
+          const url = getUrl(entry);
+          const quality = getQuality(entry);
+
+          if (!url || !quality) continue;
+          output[quality] ||= [];
+
+          if (!output[quality].some(x => x.url === url)) {
+            output[quality].push({
+              quality,
+              url,
+              size: entry?.size || ''
+            });
+          }
+        }
+      }
+
+      if (value && typeof value === 'object') {
+        walk(value, depth + 1);
       }
     }
-    episodes.sort((a,b)=>a.num-b.num);
-    return { title: d.title || '', poster: d.image || d.poster || null, url: movieUrl, links, episodes, isSeries: episodes.length > 0 };
-  }catch(e){ console.log('cinesubz details error:', e.message); return null; }
+  }
+
+  walk(item);
+
+  for (const q of ['480p', '720p', '1080p']) {
+    output[q] ||= [];
+  }
+
+  return output;
 }
 
-// ===== OMDB - poster + details විතරයි =====
-async function getOmdbData(query){
-  if(!OMDB_API) return null;
-  try{
-    const r = await fetchWithTimeout(`https://www.omdbapi.com/?t=${encodeURIComponent(query)}&apikey=${OMDB_API}`);
-    const omdb = await r.json();
-    if(omdb.Response!== 'True') return null;
+function findEpisodes(item) {
+  const candidates =
+    item?.episodes ||
+    item?.episode_list ||
+    item?.seasons?.flatMap(s => s.episodes || []) ||
+    item?.data?.episodes ||
+    [];
+
+  if (!Array.isArray(candidates)) return [];
+
+  return candidates.map((ep, index) => {
+    const episodeNumber =
+      ep?.episode_number ??
+      ep?.episode ??
+      ep?.number ??
+      index + 1;
+
     return {
-      title: omdb.Title,
-      release: omdb.Released && omdb.Released!=='N/A'? omdb.Released : (omdb.Year || 'N/A'),
-      duration: omdb.Runtime && omdb.Runtime!=='N/A'? omdb.Runtime : 'N/A',
-      imdb: omdb.imdbRating && omdb.imdbRating!=='N/A'? omdb.imdbRating : 'N/A',
-      genres: omdb.Genre && omdb.Genre!=='N/A'? omdb.Genre : 'N/A',
-      country: omdb.Country && omdb.Country!=='N/A'? omdb.Country : 'N/A',
-      plot: omdb.Plot && omdb.Plot!=='N/A'? omdb.Plot : 'No description available.',
-      poster: omdb.Poster && omdb.Poster!=='N/A'? omdb.Poster : null
+      number: episodeNumber,
+      title: ep?.title || ep?.name || `Episode ${episodeNumber}`,
+      links: findLinkObject(ep)
     };
-  }catch(e){ return null; }
-}
-
-async function sendVideoFromUrl(ctx, videoLink){
-  const caption='✅ Done! POWERED BY CINEMAX';
-  try{ await ctx.replyWithVideo(videoLink,{caption}); return{ok:true}; }catch(e){}
-  try{
-    const res=await fetchWithTimeout(videoLink,{},600000);
-    if(!res.ok) throw new Error(`fetch failed: ${res.status}`);
-    const len=Number(res.headers.get('content-length')||0);
-    if(len && len>MAX_TG_SIZE) return{ok:false,tooBig:true,size:len};
-    const buf=await res.arrayBuffer();
-    if(buf.byteLength>MAX_TG_SIZE) return{ok:false,tooBig:true,size:buf.byteLength};
-    await ctx.replyWithVideo({source:Buffer.from(buf),filename:'video.mp4'},{caption});
-    return{ok:true};
-  }catch(err){return{ok:false,error:err.message};}
-}
-
-function buildDlKeyboard(dlId, resolved){
-  const kb=[];
-  resolved.forEach((r,i)=>{
-    const label=`${r.quality}${r.size?` • ${r.size}`:''}`;
-    const row=[];
-    if(r.direct) row.push({text:`📥 ${label} (TG)`, callback_data:`mdt_${dlId}_${i}`});
-    row.push({text:`🔗 ${label}`, url:r.direct || r.gw});
-    kb.push(row);
   });
-  return kb;
 }
 
-// ===== TEXT HANDLER =====
-async function handleText(ctx){
-  const raw=ctx.message.text?.trim();
-  if(!raw||raw.startsWith('/')) return;
+function normalizeCatalog(json) {
+  const root = json?.result || json?.data || json;
+  let movies = [];
+  let series = [];
 
-  // Social / Direct check
-  const platform=detectPlatform(raw);
-  if(platform){
-    const statusMsg=await ctx.reply(`🔍 ${platform.toUpperCase()} වීඩියෝ එක analyze කරනවා...`);
-    const id=createId();
-    if(platform==='youtube'){
-      const ytInfo=await getYouTubeMetadata(raw);
-      try{await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id);}catch(e){}
-      const info=ytInfo||{title:'YouTube Video',author:'Unknown',views:'N/A',date:'N/A',thumb:null};
-      setCache(socialCache,id,{platform:'youtube',url:raw});
-      const kb=[[{text:'360p',callback_data:`soc_${id}_360`},{text:'480p',callback_data:`soc_${id}_480`}],[{text:'720p HD',callback_data:`soc_${id}_720`},{text:'1080p FHD',callback_data:`soc_${id}_1080`}]];
-      const captionText=`🎬 <b>${esc(info.title)}</b>\n\n👤 <b>Channel:</b> ${esc(info.author)}\n👁️ <b>Views:</b> ${esc(info.views)}\n📅 <b>Date:</b> ${esc(info.date)}\n\n👇 අවශ්‍ය Quality එක තෝරන්න:`;
-      if(info.thumb){try{await ctx.replyWithPhoto(info.thumb,{caption:captionText,parse_mode:'HTML',reply_markup:{inline_keyboard:kb}});return;}catch(e){}}
-      await ctx.reply(captionText,{parse_mode:'HTML',reply_markup:{inline_keyboard:kb}});return;
-    }
-    const videoData=await fetchSocialMediaVideo(raw,platform);
-    try{await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id);}catch(e){}
-    if(videoData?.url){
-      setCache(socialCache,id,{platform,videoUrl:videoData.url});
-      await ctx.reply(buildCaption(platform,videoData.title),{reply_markup:{inline_keyboard:[[{text:'📥 Video එක ලබාගන්න',callback_data:`soc_${id}_get`}]]}});return;
-    }
-    return ctx.reply('❌ වීඩියෝ එක හොයාගන්න බැරි වුණා.');
+  if (Array.isArray(root)) {
+    movies = root.filter(x =>
+      /movie|film/i.test(String(x?.type || x?.category || ''))
+    );
+
+    series = root.filter(x =>
+      /series|tv|show/i.test(String(x?.type || x?.category || ''))
+    );
+  } else {
+    movies =
+      root?.movies ||
+      root?.films ||
+      root?.movie ||
+      root?.data?.movies ||
+      [];
+
+    series =
+      root?.tv_series ||
+      root?.series ||
+      root?.tv ||
+      root?.shows ||
+      root?.data?.series ||
+      [];
   }
 
-  const directType=detectDirectLink(raw);
-  if(directType){
-    let finalUrl=directType==='gdrive'?convertGoogleDriveLink(raw):raw;
-    const id=createId(); setCache(directCache,id,{url:finalUrl});
-    await ctx.reply('🔗 Link එක හඳුනාගැනිණි!',{reply_markup:{inline_keyboard:[[{text:'📥 Send as Video',callback_data:`send_${id}`}]]}});return;
+  if (!Array.isArray(movies)) movies = [];
+  if (!Array.isArray(series)) series = [];
+
+  // If the API supplies an untyped list, inspect its entries.
+  if (Array.isArray(root) && !movies.length && !series.length) {
+    for (const item of root) {
+      const isSeries =
+        Array.isArray(item?.episodes) ||
+        Array.isArray(item?.episode_list) ||
+        Array.isArray(item?.seasons) ||
+        /series|tv|show/i.test(
+          String(item?.type || item?.category || '')
+        );
+
+      (isSeries ? series : movies).push(item);
+    }
   }
 
-  // ===== FILM / TV DETECT =====
-  let mode = 'film'; // default film
-  let query = raw;
-  if(raw.toLowerCase().startsWith('film ')){ mode='film'; query=raw.slice(5).trim(); }
-  else if(raw.toLowerCase().startsWith('tv ')){ mode='tv'; query=raw.slice(3).trim(); }
-  else if(raw.toLowerCase().startsWith('movie ')){ mode='film'; query=raw.slice(6).trim(); }
-
-  if(!query) return ctx.reply("Use: \n`film avatar`\n`tv breaking bad`", {parse_mode:'Markdown'});
-
-  await ctx.reply(`🔍 ${mode==='tv'?'TV Series':'Movie'} "${query}" හොයනවා...\n📡 My API එකෙන්...`);
-
-  try{
-    // 1) MY API එකෙන් හොයනවා
-    const myHit = await searchMyApi(query);
-    if(!myHit) return ctx.reply(`❌ "${query}" My API එකේ හම්බුනේ නෑ.\n${MY_API_URL}`);
-
-    // 2) Cinesubz Details (links + episodes) ගන්නවා
-    const csMovie = await getCinesubzMovie(myHit.url);
-    if(!csMovie) return ctx.reply('❌ Details ගන්න බැරි වුණා.');
-
-    // 3) OMDB එකෙන් poster + details විතරයි
-    const omdb = await getOmdbData(query) || await getOmdbData(myHit.title) || await getOmdbData(csMovie.title);
-
-    const title = omdb?.title || csMovie.title || myHit.title || query;
-    const release = omdb?.release || 'N/A';
-    const duration = omdb?.duration || 'N/A';
-    const imdb = omdb?.imdb || 'N/A';
-    const genres = omdb?.genres || 'N/A';
-    const country = omdb?.country || 'N/A';
-    const plot = omdb?.plot || 'No description available.';
-    const poster = omdb?.poster || myHit.poster || csMovie.poster || null;
-    const photoSource = poster || (fs.existsSync(ALIVE_LOCAL_PATH)? {source:fs.createReadStream(ALIVE_LOCAL_PATH)} : null);
-
-    const caption =
-`☘️ *NAME* ☛ ${title}
-
-*▫️📅 𝗥𝗲𝗹𝗲𝗮𝘀𝗲* ☛ ${release}
-*▫️⏱ 𝗗ᴜʀᴀᴛɪᴏɴ* ☛ ${duration}
-*▫️⭐ 𝗜𝗠𝗗𝗕* ☛ ${imdb}
-*▫️🎭 𝗚ᴇɴʀᴇꜱ* ☛ ${genres}
-*▫️🌎 𝗖ᴏᴜɴᴛʀʏ* ☛ ${country}
-
-*▫️📃 𝗗ᴇꜱᴄʀɪᴘᴛɪᴏɴ* ☛
-${plot}
-
-*➟➟➟➟➟➟➟➟*
-*▫️🔗 𝗠𝗼𝘃𝗶𝗲 SITE ♡*
-${SITE_NAME} ◇
-*➟➟➟➟➟➟➟➟*`;
-
-    if(mode === 'tv' || csMovie.isSeries){
-      // ===== TV SERIES =====
-      const tvId = createId();
-      setCache(tvCache, tvId, {title, csMovie, omdb}, 1800000);
-
-      let kb = [];
-      if(csMovie.episodes.length > 0){
-        // Episode 1, Episode 2... buttons
-        for(const ep of csMovie.episodes){
-          kb.push([{text:`📺 Episode ${ep.num} Download`, callback_data:`tve_${tvId}_${ep.num}`}]);
-        }
-      }else{
-        // Episode detect වුනේ නැත්නම් dl_links ටිකම episodes විදියට දානවා
-        const allLinks = [...csMovie.links['480p'],...csMovie.links['720p'],...csMovie.links['1080p']];
-        // unique by epName group
-        const grouped = {};
-        allLinks.forEach(l => {
-          const name = l.epName || l.quality;
-          if(!grouped[name]) grouped[name] = [];
-          grouped[name].push(l);
-        });
-        let i=1;
-        for(const name in grouped){
-          kb.push([{text:`📺 ${name.slice(0,40)} Download`, callback_data:`tve_${tvId}_custom_${i}`}]);
-          // store custom mapping
-          tvCache.set(tvId+`_custom_${i}`, grouped[name]);
-          i++;
-          if(i>30) break; // limit 30
-        }
-      }
-      kb.push([{text:'🌐 Visit Site', url: csMovie.url}]);
-
-      if(photoSource){
-        try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-        catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-      }else{
-        await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
-      }
-    }else{
-      // ===== MOVIE =====
-      const movieId=createId();
-      setCache(movieCache, movieId, {query,title,csMovie});
-
-      const kb=[];
-      const q480=csMovie.links['480p'].length, q720=csMovie.links['720p'].length, q1080=csMovie.links['1080p'].length;
-      const row=[];
-      if(q480) row.push({text:'480P', callback_data:`mq_${movieId}_480p`});
-      if(q720) row.push({text:'720P', callback_data:`mq_${movieId}_720p`});
-      if(row.length) kb.push(row);
-      if(q1080) kb.push([{text:'1080P', callback_data:`mq_${movieId}_1080p`}]);
-      kb.push([{text:'🌐 Visit Site', url: csMovie.url}]);
-
-      if(photoSource){
-        try{ await ctx.replyWithPhoto(photoSource,{caption,parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-        catch(e){ await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}}); }
-      }else{
-        await ctx.reply(caption,{parse_mode:'Markdown',reply_markup:{inline_keyboard:kb}});
-      }
-    }
-
-  }catch(e){ console.log('Movie search error', e); ctx.reply('❌ Error එකක් ආවා.'); }
+  return {
+    movies: movies.map(item => ({
+      ...item,
+      title: getTitle(item),
+      links: findLinkObject(item)
+    })),
+    series: series.map(item => ({
+      ...item,
+      title: getTitle(item),
+      episodes: findEpisodes(item)
+    }))
+  };
 }
 
-// ===== CALLBACK HANDLER =====
-async function handleCallback(ctx){
-  const data=ctx.callbackQuery.data;
-
-  if(data.startsWith('soc_')){
-    await ctx.answerCbQuery('⏳ Downloading...').catch(()=>{});
-    const parts=data.split('_'); const id=parts[1]; const q=parts[2];
-    const cached=socialCache.get(id); if(!cached) return ctx.reply('⌛ Expired! නැවත Link එක එවන්න.');
-    let videoLink=cached.videoUrl;
-    if(cached.platform==='youtube'){
-      const waitMsg=await ctx.reply(`⏳ ${q}p quality එක හොයනවා...`);
-      videoLink=await getCobaltDownloadLink(cached.url,q);
-      try{await ctx.telegram.deleteMessage(ctx.chat.id,waitMsg.message_id);}catch(e){}
-    }
-    if(!videoLink) return ctx.reply('❌ Link එක ගන්න බැරිවුනා.');
-    const statusMsg=await ctx.reply('⏳ Telegram එකට Upload වෙනවා...');
-    const result=await sendVideoFromUrl(ctx,videoLink);
-    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-    if(!result.ok){
-      if(result.tooBig) return ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB). Limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\nDirect Link:\n${videoLink}`);
-      return ctx.reply(`❌ Upload Fail. Link:\n${videoLink}`);
-    }
-    return;
+async function getCatalog() {
+  if (
+    catalogCache.data &&
+    Date.now() - catalogCache.time < 60000
+  ) {
+    return catalogCache.data;
   }
 
-  if(data.startsWith('send_')){
-    await ctx.answerCbQuery('⏳ Downloading...').catch(()=>{});
-    const id=data.split('_')[1]; const cached=directCache.get(id); if(!cached) return ctx.reply('⌛ Expired.');
-    const statusMsg=await ctx.reply('⏳ Uploading...');
-    const result=await sendVideoFromUrl(ctx,cached.url);
-    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-    if(!result.ok) return ctx.reply('❌ Fail.');
-    await ctx.reply('✅ Done! POWERED BY CINEMAX');
-    return;
+  const response = await fetchTimeout(MOVIE_API_URL);
+
+  if (!response.ok) {
+    throw new Error(`Movie API returned ${response.status}`);
   }
 
-  // TV Episode Click -> Quality Select
-  if(data.startsWith('tve_')){
-    await ctx.answerCbQuery().catch(()=>{});
-    const parts = data.split('_');
-    const tvId = parts[1];
-    const cached = tvCache.get(tvId);
-    if(!cached) return ctx.reply('⌛ Expired. නැවත TV Series එක හොයන්න. `tv name`');
+  const json = await response.json();
+  const catalog = normalizeCatalog(json);
 
-    let episodeNum = parts[2];
-    let episode = null;
-    if(episodeNum === 'custom'){
-      const customId = parts[3];
-      const customLinks = tvCache.get(tvId+`_custom_${customId}`);
-      // custom එක quality select එකට යවන්න
-      const qId = createId();
-      const linksByQ = {'480p':[], '720p':[], '1080p':[]};
-      customLinks.forEach(l=>{
-        const qm = l.quality.match(/(480|720|1080)/);
-        if(qm) linksByQ[qm[1]+'p'].push(l);
-        else linksByQ['720p'].push(l);
+  catalogCache.data = catalog;
+  catalogCache.time = Date.now();
+
+  return catalog;
+}
+
+function searchItem(items, query) {
+  const q = norm(query);
+  if (!q) return null;
+
+  const exact = items.find(item => norm(item.title) === q);
+  if (exact) return exact;
+
+  const contains = items.filter(item =>
+    norm(item.title).includes(q) ||
+    q.includes(norm(item.title))
+  );
+
+  if (contains.length === 1) return contains[0];
+
+  // Prefer the closest title instead of blindly selecting
+  // the first result when several items match.
+  return contains.sort((a, b) =>
+    Math.abs(norm(a.title).length - q.length) -
+    Math.abs(norm(b.title).length - q.length)
+  )[0] || null;
+}
+
+async function getOmdbData(title, type) {
+  if (!OMDB_API) return null;
+
+  try {
+    const url = new URL('https://www.omdbapi.com/');
+    url.searchParams.set('apikey', OMDB_API);
+    url.searchParams.set('t', title);
+
+    if (type === 'tv') url.searchParams.set('type', 'series');
+    if (type === 'movie') url.searchParams.set('type', 'movie');
+
+    const response = await fetchTimeout(url.toString());
+    const data = await response.json();
+
+    if (data.Response !== 'True') return null;
+
+    return {
+      title: data.Title || title,
+      year: data.Year || 'N/A',
+      released: data.Released || 'N/A',
+      runtime: data.Runtime || 'N/A',
+      rating: data.imdbRating || 'N/A',
+      genre: data.Genre || 'N/A',
+      country: data.Country || 'N/A',
+      plot: data.Plot || 'No description available.',
+      poster: data.Poster !== 'N/A' ? data.Poster : null
+    };
+  } catch (error) {
+    console.error('OMDB error:', error.message);
+    return null;
+  }
+}
+
+function qualityKeyboard(id, links, prefix = 'dl') {
+  const buttons = [];
+
+  for (const quality of ['480p', '720p', '1080p']) {
+    if (links?.[quality]?.length) {
+      buttons.push({
+        text: quality.toUpperCase(),
+        callback_data: `${prefix}_${id}_${quality}`
       });
-      setCache(dlCache, qId, {title: `${cached.title} - Part ${customId}`, links: linksByQ}, 1800000);
-      const kb=[];
-      if(linksByQ['480p'].length) kb.push([{text:'480P', callback_data:`tvmq_${qId}_480p`}]);
-      if(linksByQ['720p'].length) kb.push([{text:'720P', callback_data:`tvmq_${qId}_720p`}]);
-      if(linksByQ['1080p'].length) kb.push([{text:'1080P', callback_data:`tvmq_${qId}_1080p`}]);
-      return ctx.reply(`📺 ${cached.title} - Episode / Part ${customId}\n\n👇 Quality එක තෝරන්න:`, {reply_markup:{inline_keyboard:kb}});
-    }else{
-      episodeNum = parseInt(episodeNum);
-      episode = cached.csMovie.episodes.find(e=>e.num===episodeNum);
-      if(!episode) return ctx.reply('❌ Episode එක හම්බුනේ නෑ.');
-      const qId = createId();
-      setCache(dlCache, qId, {title: `${cached.title} - Episode ${episodeNum}`, links: episode.links}, 1800000);
-      const kb=[];
-      if(episode.links['480p'].length) kb.push([{text:'480P', callback_data:`tvmq_${qId}_480p`}]);
-      if(episode.links['720p'].length) kb.push([{text:'720P', callback_data:`tvmq_${qId}_720p`}]);
-      if(episode.links['1080p'].length) kb.push([{text:'1080P', callback_data:`tvmq_${qId}_1080p`}]);
-      return ctx.reply(`📺 ${cached.title}\n🎬 Episode ${episodeNum}\n\n👇 Quality එක තෝරන්න:`, {reply_markup:{inline_keyboard:kb}});
     }
   }
 
-  // TV Movie Quality -> Upload
-  if(data.startsWith('tvmq_')){
-    await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
-    const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
-    const cached=dlCache.get(id); if(!cached) return ctx.reply('⌛ Expired.');
-    const items=cached.links?.[quality]||[];
-    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ.`);
+  return {
+    inline_keyboard: buttons.length ? [buttons] : []
+  };
+}
 
-    const dlId=createId();
-    const resolved=items.map(item=>({quality:item.quality, size:item.size, gw:item.link, direct:item.link}));
-    setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
+function makeEpisodeKeyboard(id, episodes) {
+  const rows = [];
 
-    const best = resolved[0];
-    const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} download වෙනවා...\n📦 Size: ${best.size||'Unknown'}`);
-    const result=await sendVideoFromUrl(ctx,best.direct);
-    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-    if(result.ok) return;
-    if(result.tooBig){
-      await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
-      return;
-    }
-    await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). Links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
-    return;
+  for (const ep of episodes) {
+    rows.push([{
+      text: `📥 ${ep.title}`,
+      callback_data: `ep_${id}_${ep.number}`
+    }]);
   }
 
-  if(data.startsWith('mq_')){
-    await ctx.answerCbQuery('⏳ Link හොයනවා...').catch(()=>{});
-    const parts=data.split('_'); const id=parts[1]; const quality=parts[2];
-    const cached=movieCache.get(id); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න. `film name`');
-    const items=cached.csMovie?.links?.[quality]||[];
-    if(!items.length) return ctx.reply(`❌ ${quality} links නෑ. Site එකේ බලන්න:\n${cached.csMovie?.url||'https://'+SITE_NAME}`);
+  return { inline_keyboard: rows };
+}
 
-    const dlId=createId();
-    const resolved=items.map(item=>({quality:item.quality, size:item.size, gw:item.link, direct:item.link}));
-    setCache(dlCache, dlId, {title:cached.title, resolved}, 1800000);
-
-    const best = resolved.find(r=>r.direct);
-    if(best){
-      const statusMsg=await ctx.reply(`⏳ ${cached.title} - ${quality.toUpperCase()} Telegram එකට download වෙනවා...\n📦 Size: ${best.size||'Unknown'}`);
-      const result=await sendVideoFromUrl(ctx,best.direct);
-      await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-      if(result.ok) return;
-      if(result.tooBig){
-        await ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB) — TG limit එක ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\n👇 මේ links වලින් ඕන එක download කරගන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
-        return;
-      }
-      await ctx.reply(`❌ Upload fail (${result.error||'unknown'}). ඒත් links මෙන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
-      return;
-    }
-    await ctx.reply(`✅ ${cached.title} - ${quality.toUpperCase()} Links\n\n👇 Download කරන්න:`,{reply_markup:{inline_keyboard:buildDlKeyboard(dlId, resolved)}});
-    return;
+async function sendVideoFromUrl(ctx, url, title = 'video') {
+  if (!url) {
+    return { ok: false, error: 'No video URL' };
   }
 
-  if(data.startsWith('mdt_')){
-    await ctx.answerCbQuery('⏳ Downloading to Telegram...').catch(()=>{});
-    const parts=data.split('_'); const dlId=parts[1]; const idx=parseInt(parts[2]);
-    const cached=dlCache.get(dlId); if(!cached) return ctx.reply('⌛ Expired. නැවත Movie එක හොයන්න.');
-    const item=cached.resolved[idx];
-    if(!item?.direct) return ctx.reply('❌ Link එක වැඩ කරන්නේ නෑ. Gateway link එක try කරන්න:\n'+(item?.gw||''));
+  const caption = `✅ ${title}\nPOWERED BY CINEMAX`;
 
-    const statusMsg=await ctx.reply(`⏳ ${item.quality} download වෙනවා...`);
-    const result=await sendVideoFromUrl(ctx,item.direct);
-    await ctx.telegram.deleteMessage(ctx.chat.id,statusMsg.message_id).catch(()=>{});
-    if(!result.ok){
-      if(result.tooBig){
-        return ctx.reply(`⚠️ File එක ලොකුයි (${(result.size/1024/1024).toFixed(1)}MB). Bot limit ${(MAX_TG_SIZE/1024/1024).toFixed(0)}MB.\n\nDirect Link:\n${item.direct}`);
-      }
-      return ctx.reply(`❌ Upload Fail.\n\nDirect Link:\n${item.direct}\n\nGateway:\n${item.gw}`);
+  // First let Telegram fetch the direct video URL.
+  try {
+    await ctx.replyWithVideo(url, {
+      caption,
+      supports_streaming: true
+    });
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Telegram URL upload failed:', error.message);
+  }
+
+  // Fallback: download to the bot server and upload.
+  let response;
+
+  try {
+    response = await fetchTimeout(url, {}, 600000);
+
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status}`);
     }
-    return;
+
+    const contentType = response.headers.get('content-type') || '';
+
+    if (
+      contentType &&
+      !/video|octet-stream|application\/download/i.test(contentType)
+    ) {
+      throw new Error('URL did not return a video file');
+    }
+
+    const contentLength = Number(
+      response.headers.get('content-length') || 0
+    );
+
+    if (contentLength && contentLength > MAX_TG_SIZE) {
+      return {
+        ok: false,
+        tooBig: true,
+        size: contentLength
+      };
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (buffer.length > MAX_TG_SIZE) {
+      return {
+        ok: false,
+        tooBig: true,
+        size: buffer.length
+      };
+    }
+
+    await ctx.replyWithVideo(
+      { source: buffer, filename: 'video.mp4' },
+      { caption, supports_streaming: true }
+    );
+
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
   }
 }
 
-module.exports={handleText,handleCallback};
+async function handleText(ctx) {
+  const input = ctx.message?.text?.trim();
+  if (!input || input.startsWith('/')) return;
+
+  const match = input.match(/^(movie|tv)\s+(.+)$/i);
+
+  if (!match) {
+    return ctx.reply(
+      '🎬 Film එකකට: movie Avatar\n' +
+      '📺 Series එකකට: tv Wednesday'
+    );
+  }
+
+  const type = match[1].toLowerCase() === 'tv' ? 'tv' : 'movie';
+  const query = match[2].trim();
+
+  if (!query) return ctx.reply('Film / Series නම ඇතුළත් කරන්න.');
+
+  const status = await ctx.reply('🔍 Search කරනවා...');
+
+  try {
+    const catalog = await getCatalog();
+    const item = searchItem(
+      type === 'tv' ? catalog.series : catalog.movies,
+      query
+    );
+
+    if (!item) {
+      await ctx.telegram.deleteMessage(
+        ctx.chat.id,
+        status.message_id
+      ).catch(() => {});
+
+      return ctx.reply('❌ API එකේ මේ title එක හමු වුණේ නැහැ.');
+    }
+
+    const metadata = await getOmdbData(item.title, type);
+
+    await ctx.telegram.deleteMessage(
+      ctx.chat.id,
+      status.message_id
+    ).catch(() => {});
+
+    const id = createId();
+
+    if (type === 'movie') {
+      const links = item.links || findLinkObject(item);
+      const hasLinks = ['480p', '720p', '1080p']
+        .some(q => links[q]?.length);
+
+      if (!hasLinks) {
+        return ctx.reply(
+          '❌ මේ film එකට 480p / 720p / 1080p links හමු වුණේ නැහැ.'
+        );
+      }
+
+      const details =
+        `🎬 <b>${esc(metadata?.title || item.title)}</b>\n\n` +
+        `📅 Year: ${esc(metadata?.year || 'N/A')}\n` +
+        `⭐ IMDb: ${esc(metadata?.rating || 'N/A')}\n` +
+        `⏱ Runtime: ${esc(metadata?.runtime || 'N/A')}\n` +
+        `🎭 Genre: ${esc(metadata?.genre || 'N/A')}\n\n` +
+        `${esc(metadata?.plot || 'No description available.')}\n\n` +
+        `👇 Download quality එක තෝරන්න`;
+
+      cacheSet(movieCache, id, {
+        type: 'movie',
+        title: item.title,
+        links
+      });
+
+      const keyboard = qualityKeyboard(id, links, 'dl');
+
+      if (metadata?.poster) {
+        try {
+          await ctx.replyWithPhoto(metadata.poster, {
+            caption: details,
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+          });
+          return;
+        } catch (error) {}
+      }
+
+      const localPoster = fs.existsSync(ALIVE_LOCAL_PATH)
+        ? { source: fs.createReadStream(ALIVE_LOCAL_PATH) }
+        : null;
+
+      if (localPoster) {
+        try {
+          await ctx.replyWithPhoto(localPoster, {
+            caption: details,
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+          });
+          return;
+        } catch (error) {}
+      }
+
+      return ctx.reply(details, {
+        parse_mode: 'HTML',
+        reply_markup: keyboard
+      });
+    }
+
+    // TV series: show metadata and all episodes.
+    const episodes = item.episodes || [];
+
+    if (!episodes.length) {
+      return ctx.reply(
+        '❌ Series එක හමු වුණා. නමුත් JSON API එකේ episodes නැහැ.'
+      );
+    }
+
+    cacheSet(movieCache, id, {
+      type: 'tv',
+      title: item.title,
+      episodes
+    });
+
+    const details =
+      `📺 <b>${esc(metadata?.title || item.title)}</b>\n\n` +
+      `📅 Year: ${esc(metadata?.year || 'N/A')}\n` +
+      `⭐ IMDb: ${esc(metadata?.rating || 'N/A')}\n` +
+      `🎭 Genre: ${esc(metadata?.genre || 'N/A')}\n` +
+      `🌍 Country: ${esc(metadata?.country || 'N/A')}\n\n` +
+      `${esc(metadata?.plot || 'No description available.')}\n\n` +
+      `📦 Episodes: ${episodes.length}\n` +
+      `👇 අවශ්‍ය episode එක තෝරන්න`;
+
+    const keyboard = makeEpisodeKeyboard(id, episodes);
+
+    if (metadata?.poster) {
+      try {
+        await ctx.replyWithPhoto(metadata.poster, {
+          caption: details,
+          parse_mode: 'HTML',
+          reply_markup: keyboard
+        });
+        return;
+      } catch (error) {}
+    }
+
+    return ctx.reply(details, {
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error('Search error:', error);
+
+    await ctx.telegram.deleteMessage(
+      ctx.chat.id,
+      status.message_id
+    ).catch(() => {});
+
+    return ctx.reply(
+      '❌ API error එකක් ආවා. JSON URL එක සහ server logs පරීක්ෂා කරන්න.'
+    );
+  }
+}
+
+async function handleCallback(ctx) {
+  const data = ctx.callbackQuery?.data || '';
+
+  await ctx.answerCbQuery().catch(() => {});
+
+  // Movie quality selected.
+  if (data.startsWith('dl_')) {
+    const [, id, quality] = data.split('_');
+    const cached = movieCache.get(id);
+
+    if (!cached || cached.type !== 'movie') {
+      return ctx.reply('⌛ Request එක expired. නැවත search කරන්න.');
+    }
+
+    const links = cached.links?.[quality] || [];
+
+    if (!links.length) {
+      return ctx.reply('❌ මේ quality එකට link එකක් නැහැ.');
+    }
+
+    return showLinksOrUpload(ctx, cached.title, quality, links);
+  }
+
+  // TV episode selected.
+  if (data.startsWith('ep_')) {
+    const [, id, episodeNumber] = data.split('_');
+    const cached = movieCache.get(id);
+
+    if (!cached || cached.type !== 'tv') {
+      return ctx.reply('⌛ Request එක expired. නැවත series එක search කරන්න.');
+    }
+
+    const episode = cached.episodes.find(
+      ep => String(ep.number) === String(episodeNumber)
+    );
+
+    if (!episode) return ctx.reply('❌ Episode එක හමු වුණේ නැහැ.');
+
+    const available = ['480p', '720p', '1080p'].filter(
+      q => episode.links?.[q]?.length
+    );
+
+    if (!available.length) {
+      return ctx.reply('❌ මේ episode එකට download quality links නැහැ.');
+    }
+
+    const episodeId = createId();
+
+    cacheSet(dlCache, episodeId, {
+      title: `${cached.title} - ${episode.title}`,
+      links: episode.links
+    });
+
+    return ctx.reply(
+      `📺 <b>${esc(cached.title)}</b>\n` +
+      `🎞 <b>${esc(episode.title)}</b>\n\n` +
+      '👇 Quality එක තෝරන්න:',
+      {
+        parse_mode: 'HTML',
+        reply_markup: qualityKeyboard(
+          episodeId,
+          episode.links,
+          'epdl'
+        )
+      }
+    );
+  }
+
+  // TV episode quality selected.
+  if (data.startsWith('epdl_')) {
+    const [, id, quality] = data.split('_');
+    const cached = dlCache.get(id);
+
+    if (!cached) return ctx.reply('⌛ Request එක expired.');
+
+    const links = cached.links?.[quality] || [];
+
+    if (!links.length) return ctx.reply('❌ Link එක නැහැ.');
+
+    return showLinksOrUpload(ctx, cached.title, quality, links);
+  }
+}
+
+async function showLinksOrUpload(ctx, title, quality, links) {
+  // Try each URL until one successfully uploads.
+  const status = await ctx.reply(
+    `⏳ ${title} (${quality}) Telegram එකට upload කරනවා...`
+  );
+
+  let lastError = null;
+
+  for (const item of links) {
+    const result = await sendVideoFromUrl(ctx, item.url, title);
+
+    if (result.ok) {
+      await ctx.telegram.deleteMessage(
+        ctx.chat.id,
+        status.message_id
+      ).catch(() => {});
+      return;
+    }
+
+    lastError = result;
+  }
+
+  await ctx.telegram.deleteMessage(
+    ctx.chat.id,
+    status.message_id
+  ).catch(() => {});
+
+  const firstUrl = links[0]?.url;
+
+  if (lastError?.tooBig) {
+    return ctx.reply(
+      `⚠️ Video file එක Telegram upload limit එකට වඩා විශාලයි.\n` +
+      `📦 Size: ${(lastError.size / 1024 / 1024).toFixed(1)} MB\n\n` +
+      `Direct link:\n${firstUrl}`
+    );
+  }
+
+  return ctx.reply(
+    `❌ Telegram upload අසාර්ථකයි.\n` +
+    `Error: ${lastError?.error || 'Unknown error'}\n\n` +
+    `Direct link:\n${firstUrl || 'Unavailable'}`
+  );
+}
+
+module.exports = {
+  handleText,
+  handleCallback
+};
