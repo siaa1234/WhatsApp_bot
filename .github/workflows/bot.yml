@@ -38,12 +38,13 @@ jobs:
             npm init -y
           fi
           # Critical packages අනිවාර්යයෙන්ම install වෙනවා (package.json එකේ තියෙන්නත් ඕන)
-          npm install telegraf@^4.16.3 sinhalasub.lk@latest
+          npm install telegraf@^4.16.3 sinhalasub.lk@latest @sl-code-lords/movie-api@latest
 
       - name: Verify dependencies
         run: |
           node -e "require('telegraf'); console.log('✅ telegraf OK')" || echo "⚠️ telegraf missing"
           node -e "require('sinhalasub.lk'); console.log('✅ sinhalasub.lk OK')" || echo "⚠️ sinhalasub.lk missing"
+          node -e "require('@sl-code-lords/movie-api'); console.log('✅ movie-api OK')" || echo "⚠️ movie-api missing"
 
       - name: Run Bot
         env:
