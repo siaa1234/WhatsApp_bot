@@ -43,8 +43,8 @@ function runYtdlp(args) {
 
           if (/Sign in to confirm/.test(msg)) {
             return reject(new Error(
-              'YouTube මේ server IP එක block කරලා. ' +
-              'Repo Settings → Secrets → YT_COOKIES_B64 secret එක දාලා cookies enable කරන්න.'
+              'YouTub server IP එක block කරලා. ' +
+              
             ));
           }
 
