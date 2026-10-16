@@ -1,5 +1,5 @@
 // handlers/moviebox.js — MovieBox (themoviebox.xyz) BFF API → Telegram direct upload
-// Quality: 480p / 720p | Direct MP4 streams
+// Guest JWT (x-user header) → Bearer token flow included
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -8,23 +8,20 @@ const { execFile } = require('child_process');
 
 const SITE = 'https://themoviebox.xyz';
 const API = 'https://h5-api.aoneroom.com/wefeed-h5api-bff';
-const CB_PREFIX = 'mb_'; // callbacks: mb_<idx> / mbq_<quality>_<idx>_<se>_<ep>
 
-// Primary + fallback referer pairs — BFF එක එක referer එකකට whitelist කරලා තියෙන්න පුළුවන්
 const REF_SITES = [
   { Referer: SITE + '/', Origin: SITE },
   { Referer: 'https://moviebox.ph/', Origin: 'https://moviebox.ph' },
 ];
+let activeRef = 0;
 
-let activeRef = 0; // fallback trigger උනාම 1 වෙනවා
-
-const headers = () => ({
+const baseHeaders = () => ({
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
   ...REF_SITES[activeRef],
   'X-Client-Info': '{"timezone":"Asia/Colombo"}',
   'X-Request-Lang': 'en',
   Accept: 'application/json',
-  'Content-Type': 'application/json',
+  'Content-Type': 'application/json;charset=UTF-8',
   'sec-ch-ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"Windows"',
@@ -33,34 +30,62 @@ const headers = () => ({
   'sec-fetch-site': 'cross-site',
 });
 
-// Player-side headers for stream domain (netfilm.world etc.)
-const playerHeaders = () => ({
-  'User-Agent': headers()['User-Agent'],
-  Accept: 'application/json',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Cache-Control': 'no-cache',
-  'sec-fetch-dest': 'empty',
-  'sec-fetch-mode': 'cors',
-  'sec-fetch-site': 'cross-site',
-  ...REF_SITES[activeRef],
-});
+/* ================= Guest JWT manager ================= */
+let _token = null;
+
+function harvestToken(resp) {
+  // 1) x-user response header (JSON with .token)
+  const xu = resp?.headers?.get ? resp.headers.get('x-user') : resp?.headers?.['x-user'];
+  if (xu) {
+    try {
+      const t = JSON.parse(xu).token;
+      if (t) { _token = t; console.log('🔑 Guest JWT refreshed (x-user)'); return; }
+    } catch (_) {}
+  }
+  // 2) fallback: set-cookie token=
+  const sc = (resp?.headers?.['set-cookie'] || (resp?.headers?.get && resp.headers.get('set-cookie')) || '');
+  const m = /token=([^;]+)/.exec(sc);
+  if (m) { _token = m[1]; console.log('🔑 Guest JWT refreshed (cookie)'); }
+}
+
+async function apiGet(url, extra = {}) {
+  const h = baseHeaders();
+  if (_token) h.Authorization = `Bearer ${_token}`;
+  const resp = await axios.get(url, { headers: { ...h, ...extra }, timeout: 25000 });
+  harvestToken(resp);
+  return resp.data;
+}
+
+async function apiPost(url, payload) {
+  const h = baseHeaders();
+  if (_token) h.Authorization = `Bearer ${_token}`;
+  const resp = await axios.post(url, payload, { headers: h, timeout: 25000 });
+  harvestToken(resp);
+  return resp.data;
+}
+
+// Bootstrap: /home එකෙන් guest JWT එක ගන්නවා (x-user header)
+async function ensureToken() {
+  if (_token) return _token;
+  try {
+    const resp = await axios.get(
+      `${API}/home?host=themoviebox.xyz`,
+      { headers: { ...baseHeaders(), Authorization: undefined }, timeout: 25000 }
+    );
+    harvestToken(resp);
+  } catch (e) {
+    // 403/4xx වුනත් response headers වල token එක එනවා ඇති
+    if (e.response) harvestToken(e.response);
+  }
+  console.log(_token ? '✅ Guest JWT ready' : '⚠️ Guest JWT ලැබුණේ නෑ (token නැතුව continue)');
+  return _token;
+}
 
 const cache = new Map();
 const cacheSet = (k, v, ttl = 30 * 60 * 1000) => {
   cache.set(k, { v, time: Date.now() });
   setTimeout(() => cache.delete(k), ttl).unref?.();
 };
-
-/* ================= API helpers ================= */
-async function apiGet(url, extra = {}) {
-  const { data } = await axios.get(url, { headers: { ...headers(), ...extra }, timeout: 25000 });
-  return data;
-}
-
-async function apiPost(url, payload) {
-  const { data } = await axios.post(url, payload, { headers: headers(), timeout: 25000 });
-  return data;
-}
 
 /* ================= 1. Search ================= */
 async function search(query, page = 1) {
@@ -77,14 +102,18 @@ async function search(query, page = 1) {
   }));
 }
 
-// Fallback එකත් එක්ක search — first site block උනොත් දෙවෙනි referer එක try කරනවා
 async function searchWithFallback(query, page = 1) {
+  await ensureToken();
   try {
     const r = await search(query, page);
     if (r.length) return r;
-  } catch (e) { /* fallback try */ }
-  activeRef = 1;
-  try { return await search(query, page); } finally { activeRef = 0; }
+  } catch (e) { console.log('mb search fail:', e.response?.status || e.message); }
+  // fallback: alt referer + fresh token
+  activeRef = 1; _token = null;
+  try {
+    await ensureToken();
+    return await search(query, page);
+  } finally { activeRef = 0; }
 }
 
 /* ================= 2. Streams (direct MP4 480p/720p) ================= */
@@ -93,7 +122,6 @@ async function getDomain() {
   return (d?.data || 'https://netfilm.world').replace(/\/$/, '');
 }
 
-// movie: se=1,ep=1 | series: user දෙන se/ep
 async function getStreams(subjectId, slug, se = 1, ep = 1) {
   const domain = await getDomain();
   const referer = `${domain}/spa/videoPlayPage/movies/${slug}?id=${subjectId}&type=/movie/detail&detailSe=${se}&detailEp=${ep}&lang=en`;
@@ -119,7 +147,7 @@ function downloadFile(url, dest, onPct, referer) {
     const mod = url.startsWith('http://') ? require('http') : require('https');
     mod.get(url, {
       headers: {
-        'User-Agent': headers()['User-Agent'],
+        'User-Agent': baseHeaders()['User-Agent'],
         Referer: referer || domainReferer(),
         Range: 'bytes=0-',
       },
@@ -186,9 +214,9 @@ async function cmdMoviebox(ctx) {
     await ctx.reply(`🎬 <b>${query}</b> — MovieBox results:`,
       { parse_mode: 'HTML', reply_markup: { inline_keyboard: buttons } });
   } catch (e) {
-    console.error('mb search:', e.message);
+    console.error('mb search:', e.response?.status, e.message);
     ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
-    ctx.reply('⚠️ MovieBox connect වෙන්න බැරි වුණා.');
+    ctx.reply(`⚠️ MovieBox connect වෙන්න බැරි වුණා.\n\n🛠️ Debug: ${e.response?.status || ''} ${e.message}`);
   }
 }
 
@@ -197,7 +225,6 @@ async function handleMbCallback(ctx) {
   await ctx.answerCbQuery();
   const parts = raw.split('_'); // mb_<idx> | mbq_<q>_<idx>_<se>_<ep>
 
-  /* ---- Step 1: film select → 480p / 720p buttons ---- */
   if (parts[0] === 'mb') {
     const idx = parseInt(parts[1], 10);
     const cached = cache.get(`mb_r_${ctx.chat.id}`);
@@ -218,13 +245,12 @@ async function handleMbCallback(ctx) {
       await ctx.editMessageText(`<b>${item.title}</b>\n\nQuality select කරන්න:`,
         { parse_mode: 'HTML', reply_markup: { inline_keyboard: kb } });
     } catch (e) {
-      console.error('mb streams:', e.message);
-      ctx.reply('⚠️ Streams error.');
+      console.error('mb streams:', e.response?.status, e.message);
+      ctx.reply(`⚠️ Streams error.\n🛠️ Debug: ${e.response?.status || ''} ${e.message}`);
     }
     return;
   }
 
-  /* ---- Step 2: quality select → direct download → upload ---- */
   if (parts[0] === 'mbq') {
     const [, q, idx, se, ep] = parts;
     const item = cache.get(`mb_i_${ctx.chat.id}`)?.v?.item;
