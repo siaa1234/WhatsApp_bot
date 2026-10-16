@@ -43,8 +43,7 @@ function runYtdlp(args) {
 
           if (/Sign in to confirm/.test(msg)) {
             return reject(new Error(
-              'YouTub server IP එක block කරලා. ' +
-              
+              'YouTub server IP එක block කරලා.' 
             ));
           }
 
