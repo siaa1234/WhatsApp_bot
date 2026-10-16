@@ -40,14 +40,13 @@ async function search(query) {
 }
 
 /* ---------- 2. Quality links — #directdownloadlinks table parsing ---------- */
-// ✅ FIX: cinesubz එකේ download links තියෙන්නේ මේ table එකේ:
-//   tr > td > a[href] (dl page) + a > strong (quality text) | td.eq(1) = size
 async function getQualityLinks(postUrl) {
   const { data } = await axios.get(postUrl, { headers, timeout: 20000 });
   const $ = cheerio.load(data);
   const links = [], seen = new Set();
 
   // Primary: #directdownloadlinks table rows
+  // tr > td > a[href] (dl page) + a > strong (quality text) | td.eq(1) = size
   $('#directdownloadlinks > div > div > table > tbody > tr, #directdownloadlinks table tbody tr').each((_, el) => {
     const $tr = $(el);
     const href = $tr.find('td > a').attr('href') || '';
@@ -64,7 +63,7 @@ async function getQualityLinks(postUrl) {
     });
   });
 
-  // Fallback: #directdownloadlinks ඇතුළේ table නැතුව plain links නම්
+  // Fallback 1: #directdownloadlinks ඇතුළේ plain links (table නැතුව) නම්
   if (!links.length) {
     $('#directdownloadlinks a[href]').each((_, el) => {
       const href = $(el).attr('href') || '';
@@ -77,7 +76,7 @@ async function getQualityLinks(postUrl) {
     });
   }
 
-  // Fallback 2: dl page links (cinesubz.net/dl/...) පිටත pages වල නම්
+  // Fallback 2: /dl/ page links පිටත නම්
   if (!links.length) {
     $('a[href]').each((_, el) => {
       const href = $(el).attr('href') || '';
@@ -94,14 +93,12 @@ async function getQualityLinks(postUrl) {
   return links.sort((a, b) => (order[a.quality] ?? 9) - (order[b.quality] ?? 9)).slice(0, 15);
 }
 
-/* ---------- 3. DL page → direct link (cinesubz /dl/ pages වලට) ---------- */
-// dl page එකක් නම් ඇතුළේ final direct URL extract කරනවා
+/* ---------- 3. DL page → direct link ---------- */
 async function getDlPageDirect(dlUrl, depth = 0) {
   if (depth > 3) return dlUrl;
   const { data } = await axios.get(dlUrl, { headers, timeout: 20000, maxRedirects: 10 });
   const $ = cheerio.load(data);
 
-  // page ඇතුළේ ලොකු download button / link හොයනවා
   let candidates = [];
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
@@ -110,14 +107,12 @@ async function getDlPageDirect(dlUrl, depth = 0) {
     }
   });
 
-  // script ඇතුළේ URLs නම්
   if (!candidates.length) {
     const m = data.match(/https?:\/\/[^"'\s<>]+\.(?:zip|mp4|mkv)[^"'\s<>]*/i);
     if (m) candidates.push(m[0]);
   }
 
   if (candidates.length) {
-    // තව redirect page එකක් නම් follow කරනවා (direct file නොවේ නම්)
     const next = candidates[0];
     if (/\.(zip|mp4|mkv)($|\?)/i.test(next)) return next;
     try { return await getDlPageDirect(next, depth + 1); } catch (_) { return next; }
@@ -140,9 +135,7 @@ async function checkDirect(url) {
 
 /* ---------- 3c. Full resolve: dl page → direct file ---------- */
 async function resolveDirect(linkUrl) {
-  // 1) dl page එකක් නම් ඇතුළේ direct link හොයනවා
   const direct = await getDlPageDirect(linkUrl);
-  // 2) final URL header check — size + filename ගන්නවා
   try {
     return await checkDirect(direct);
   } catch (_) {
@@ -207,13 +200,24 @@ async function cmdCinesubz(ctx) {
 }
 
 async function handleCszCallback(ctx) {
-  const parts = ctx.callbackQuery.data.split('_'); // csz_<i> / cszq_<quality>_<i> / cszu_<quality>_<i>
-  const action = parts[1]; // '' / 'q' / 'u'
-  const idx = parts[parts.length - 1];
+  const raw = ctx.callbackQuery.data; // 'csz_3' / 'cszq_720p_3' / 'cszu_1080p_3'
+
+  // ✅ FIX: prefix එකෙන් action detect — underscore split bug එක අයින්
+  let action = '', quality = null, idx = null;
+  if (raw.startsWith('cszq_')) {
+    [, quality, idx] = raw.split('_');
+    action = 'q';
+  } else if (raw.startsWith('cszu_')) {
+    [, quality, idx] = raw.split('_');
+    action = 'u';
+  } else {
+    idx = raw.replace(/^csz_/, '');
+  }
+  idx = parseInt(idx, 10);
 
   const cached = cszCache.get(`r_${ctx.chat.id}`);
-  const post = cached?.v?.[parseInt(idx, 10)];
-  if (!post) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired. නැවත /cinesubz.'); }
+  const post = cached?.v?.[idx];
+  if (!post) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired. නැවත /cinesubz search කරන්න.'); }
 
   /* Step 1: film select → quality buttons */
   if (!action) {
@@ -236,10 +240,9 @@ async function handleCszCallback(ctx) {
     return;
   }
 
-  const quality = parts[2];
   const cached2 = cszCache.get(`l_${ctx.chat.id}`);
   const link = cached2?.v?.links.find(l => l.quality === quality);
-  if (!link) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired.'); }
+  if (!link) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired. නැවත /cinesubz search කරන්න.'); }
 
   /* Step 2a: quality → resolve → direct link send */
   if (action === 'q') {
