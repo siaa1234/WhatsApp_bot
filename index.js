@@ -4,12 +4,13 @@ const { handleText, handleCallback } = require('./handlers/downloader');
 const { handleDlCommand, handleDlCallback, isSocialCommand } = require('./handlers/social');
 const { cacheMessage, cmdShare, cmdId } = require('./handlers/share');
 const { cmdCinesubz, handleCszCallback } = require('./handlers/cinesubz');
+const { cmdSinhalasub, handleSsCallback } = require('./handlers/sinhalasub');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
 
 /* ================= Local Bot API Server (2GB upload limit) =================
- * BOT_API_SERVER set කරාොත් cloud limit (50MB) වෙනුවට local server (2GB) එකෙන්
+ * BOT_API_SERVER set කරාගෙත් cloud limit (50MB) වෙනුවට local server (2GB) එකෙන්
  * API calls යනවා. නැත්නම් cloud default (api.telegram.org) use වෙනවා.
  * උදා: BOT_API_SERVER=http://localhost:8081
  */
@@ -22,7 +23,6 @@ async function registerLocalToken(apiRoot, token) {
     await axios.get(`${apiRoot}/bot${token}/logOut`, { timeout: 10000 });
     console.log('🔑 Cloud එකෙන් token logOut ✅');
   } catch (e) {
-    // "404 Unauthorized" or already local — ignore, දැනටමත් local server එකේ නම් OK
     console.log('ℹ️ logOut:', e.response?.status || e.message);
   }
   try {
@@ -37,11 +37,9 @@ async function registerLocalToken(apiRoot, token) {
 /* ================= Bot instance ================= */
 const bot = new Telegraf(BOT_TOKEN, {
   apiRoot: API_ROOT,
-  // ලොකු file uploads වලට connection එක long-lived වෙන්න ඕනෑ
   handlerTimeout: 900000, // 15 min — download+upload pipeline වලට
 });
 
-// Local server use කරොත් token register කරන්න (one-time)
 if (process.env.BOT_API_SERVER) {
   registerLocalToken(API_ROOT, BOT_TOKEN).then(() => {
     console.log(`🛠️ Local Bot API: ${API_ROOT}`);
@@ -55,10 +53,9 @@ bot.command('dl', (ctx) => handleDlCommand(ctx));
 bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
+bot.command('ss', (ctx) => cmdSinhalasub(ctx));          // sinhalasub.lk search
 
-/* ================= Text routing =================
- * link එකක් නම් social downloader, නැත්නම් movie search
- */
+/* ================= Text routing ================= */
 bot.on('text', (ctx) => {
   cacheMessage(ctx);
   const text = ctx.message?.text || '';
@@ -66,7 +63,7 @@ bot.on('text', (ctx) => {
   return handleText(ctx);
 });
 
-/* ================= Media cache (reply-forward වලට) ================= */
+/* ================= Media cache ================= */
 ['video', 'photo', 'document', 'animation'].forEach(t => {
   bot.on(t, (ctx) => cacheMessage(ctx));
 });
@@ -74,6 +71,10 @@ bot.on('text', (ctx) => {
 /* ================= Callback routing ================= */
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
+
+  // sinhalasub.lk callbacks (ss_ / ssq_)
+  if (data.startsWith('ssq_')) return handleSsCallback(ctx); // quality → download+upload
+  if (data.startsWith('ss_')) return handleSsCallback(ctx);  // movie → quality select
 
   if (data.startsWith('cszq_')) return handleCszCallback(ctx); // quality → download+upload
   if (data.startsWith('csz_')) return handleCszCallback(ctx);  // movie → quality select
@@ -86,7 +87,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.3'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.4 + SinhalaSub'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
