@@ -1,4 +1,4 @@
-// index.js — Modular v7.5 (+ MovieBox themoviebox.xyz 480p & 720p)
+// index.js — Modular v7.6 (+ YouTube /yt search & download)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -7,6 +7,7 @@ const { cacheMessage, cmdShare, cmdId } = require('./handlers/share');
 const { cmdCinesubz, handleCszCallback } = require('./handlers/cinesubz');
 const { cmdSinhalasub, handleSsCallback } = require('./handlers/sinhalasub');
 const { cmdMoviebox, handleMbCallback } = require('./handlers/moviebox');
+const { cmdYt, handleYtCallback } = require('./handlers/yt');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
@@ -52,6 +53,7 @@ if (process.env.BOT_API_SERVER) {
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand(ctx));
+bot.command('yt', (ctx) => cmdYt(ctx));                    // YouTube search + download
 bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
@@ -75,6 +77,11 @@ bot.on('text', (ctx) => {
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
 
+  // YouTube callbacks (ytsel_ / ytv_ / yta_)
+  if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
+    return handleYtCallback(ctx);
+  }
+
   // sinhalasub.lk callbacks (ss_ / ssq_)
   if (data.startsWith('ssq_')) return handleSsCallback(ctx); // quality → download+upload
   if (data.startsWith('ss_')) return handleSsCallback(ctx);  // movie → quality select
@@ -95,7 +102,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.5 + MovieBox'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.6 + YouTube'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
