@@ -1,3 +1,4 @@
+// index.js — Modular v7.5 (+ MovieBox themoviebox.xyz 480p & 720p)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -5,6 +6,7 @@ const { handleDlCommand, handleDlCallback, isSocialCommand } = require('./handle
 const { cacheMessage, cmdShare, cmdId } = require('./handlers/share');
 const { cmdCinesubz, handleCszCallback } = require('./handlers/cinesubz');
 const { cmdSinhalasub, handleSsCallback } = require('./handlers/sinhalasub');
+const { cmdMoviebox, handleMbCallback } = require('./handlers/moviebox');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
@@ -54,6 +56,7 @@ bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
 bot.command('ss', (ctx) => cmdSinhalasub(ctx));          // sinhalasub.lk search
+bot.command('mb', (ctx) => cmdMoviebox(ctx));            // MovieBox (themoviebox.xyz)
 
 /* ================= Text routing ================= */
 bot.on('text', (ctx) => {
@@ -76,8 +79,13 @@ bot.on('callback_query', (ctx) => {
   if (data.startsWith('ssq_')) return handleSsCallback(ctx); // quality → download+upload
   if (data.startsWith('ss_')) return handleSsCallback(ctx);  // movie → quality select
 
+  // cinesubz callbacks (csz_ / cszq_)
   if (data.startsWith('cszq_')) return handleCszCallback(ctx); // quality → download+upload
   if (data.startsWith('csz_')) return handleCszCallback(ctx);  // movie → quality select
+
+  // MovieBox callbacks (mb_ / mbq_)
+  if (data.startsWith('mbq_')) return handleMbCallback(ctx); // quality → download+upload
+  if (data.startsWith('mb_')) return handleMbCallback(ctx);  // movie → quality select
 
   if (data.startsWith('vid_') || data.startsWith('aud_')) {
     return handleDlCallback(ctx);
@@ -87,7 +95,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.4 + SinhalaSub'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.5 + MovieBox'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
