@@ -1,16 +1,17 @@
 // handlers/sinhalasub.js — sinhalasub.lk scraper → Telegram direct upload
 // Quality: 480p / 1080p | Servers: Pixeldrain, DLServer-01/02, FilesPayout, Telagram
-// + 🔗 Direct Download URL option (resolved direct links එවනවා, download නොකර)
+// + 🔗 Direct Download URL option (getDownload → ddl.sinhalasub.net resolved links)
+// Requires: npm install sinhalasub.lk
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
-const puppeteer = require('puppeteer');
+const { getDownload } = require('sinhalasub.lk');
 
 const BASE = 'https://sinhalasub.lk';
-const QUALITIES = ['SD 480p', 'FHD 1080p']; // 720p ඉවත් කළා — 480p priority
+const QUALITIES = ['SD 480p', 'FHD 1080p']; // 720p ඉවත් — 480p priority
 const CB_PREFIX = 'ss_'; // callbacks: ss_<idx> / ssq_<quality>_<idx> / ssq_direct_<idx>
 
 const headers = {
@@ -45,8 +46,7 @@ async function search(query) {
 }
 
 /* ================= 2. Details page → quality links =================
- * Page එකේ download table එක: Options | Quality | Size
- * හැම row එකකම link එක https://sinhalasub.lk/links/<id> gateway එකක්.
+ * Download table: Options | Quality | Size — links are /links/<id> gateways
  */
 async function getQualityLinks(postUrl) {
   const { data } = await axios.get(postUrl, { headers, timeout: 20000 });
@@ -56,8 +56,7 @@ async function getQualityLinks(postUrl) {
     const url = $(el).attr('href');
     if (!url) return;
     const row = $(el).closest('tr');
-    const quality = row.find('td').eq(1).text().trim()
-      || $(el).text().trim();
+    const quality = row.find('td').eq(1).text().trim() || $(el).text().trim();
     const size = row.find('td').eq(2).text().trim();
     const q = quality.match(/(FHD\s*1080p|HD\s*720p|SD\s*480p)/i);
     if (!q) return;
@@ -69,53 +68,28 @@ async function getQualityLinks(postUrl) {
   return links;
 }
 
-/* ================= 3. Gateway link → direct download URL (Puppeteer) =================
- * sinhalasub.lk/links/<id> → redirect / JS → pixeldrain/files-payout/etc direct file URL
+/* ================= 3. Gateway link → direct download URL =================
+ * Gateway එක 3-step verification flow එකක් තියෙනවා — 'sinhalasub.lk'
+ * npm package එකේ getDownload() එක ඒක handle කරලා final direct link
+ * (ddl.sinhalasub.net / pixeldrain etc) return කරනවා.
  */
 async function resolveDirect(gatewayUrl) {
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-  });
-  try {
-    const page = await browser.newPage();
-    await page.setUserAgent(headers['User-Agent']);
-    await page.setRequestInterception(true);
-    let directUrl = null;
-    page.on('request', (req) => {
-      const u = req.url();
-      // file hosts — direct video/zip responses
-      if (/pixeldrain\.com\/(u|api\/file)\//.test(u)
-        || /files-payout|filepayout/.test(u)
-        || /\.(mp4|mkv|zip)(\?|$)/.test(u)) {
-        if (!directUrl) directUrl = u;
-      }
-      req.continue();
-    });
-    await page.goto(gatewayUrl, { waitUntil: 'networkidle2', timeout: 45000 });
-    // countdown / continue button තියෙනවා නම් click කරනවා
-    for (const sel of ['a#download', 'a.btn-dl', 'a.download-btn', 'a:has-text("Download")']) {
-      try { await page.click(sel, { timeout: 2000 }); } catch (_) {}
-      await new Promise(r => setTimeout(r, 1000));
-      if (directUrl) break;
-    }
-    if (!directUrl) {
-      // final page URL එක direct host එකක් නම් ඒකම use කරනවා
-      const finalUrl = page.url();
-      if (/pixeldrain|files-payout|filepayout/.test(finalUrl)) directUrl = finalUrl;
-    }
-    if (!directUrl) throw new Error('direct link resolve වුණේ නෑ');
-
-    // size එක HEAD request එකකින්
-    let size = null;
-    try {
-      const head = await axios.head(directUrl, { headers: { ...headers, Referer: BASE }, timeout: 10000 });
-      size = parseInt(head.headers['content-length'], 10) || null;
-    } catch (_) {}
-    return { directUrl, size };
-  } finally {
-    await browser.close().catch(() => {});
+  const res = await getDownload(gatewayUrl);
+  const directUrl = res?.result || res?.link || (typeof res === 'string' ? res : null);
+  if (!directUrl || !/^https?:\/\//.test(directUrl)) {
+    throw new Error('direct link resolve වුණේ නෑ');
   }
+  // size එක HEAD request එකකින් (optional — fail වුණත් ප්‍රශ්නයක් නෑ)
+  let size = null;
+  try {
+    const head = await axios.head(directUrl, {
+      headers: { ...headers, Referer: BASE },
+      timeout: 10000,
+      maxRedirects: 5,
+    });
+    size = parseInt(head.headers['content-length'], 10) || null;
+  } catch (_) {}
+  return { directUrl, size };
 }
 
 /* ================= 4. Download with progress ================= */
@@ -146,25 +120,22 @@ function downloadFile(url, dest, onProgress) {
 function convertToMp4(input) {
   return new Promise((resolve) => {
     const out = input.replace(/\.mp4$/, '_fixed.mp4');
-    const probe = () => new Promise(res => {
-      execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-        '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', input],
-      (err, stdout) => res(err ? null : stdout.trim()));
-    });
-    (async () => {
-      const codec = await probe();
-      const h264 = codec === 'h264';
-      // h264+mp4 නම් remux විතරයි, නැත්නම් re-encode
-      if (h264) {
+    execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', input],
+    (err, stdout) => {
+      const codec = err ? null : (stdout || '').trim();
+      if (codec === 'h264') {
+        // h264 නම් remux විතරයි — fast
         execFile('ffmpeg', ['-y', '-i', input, '-c', 'copy', '-movflags', '+faststart', out],
-          (err) => resolve({ outPath: err ? input : out, reencoded: false }));
+          (e2) => resolve({ outPath: e2 ? input : out, reencoded: false }));
       } else {
+        // hevc/mkv etc — re-encode (ටිකක් slow)
         execFile('ffmpeg', ['-y', '-i', input,
           '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
           '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', out],
-          { maxBuffer: 1024 * 1024 * 10 }, (err) => resolve({ outPath: err ? input : out, reencoded: true }));
+          { maxBuffer: 10 * 1024 * 1024 }, (e3) => resolve({ outPath: e3 ? input : out, reencoded: true }));
       }
-    })();
+    });
   });
 }
 
