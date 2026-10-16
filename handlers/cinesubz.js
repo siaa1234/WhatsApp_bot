@@ -3,10 +3,12 @@ const cheerio = require('cheerio');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFile } = require('child_process');
 
 const BASE = process.env.CSZ_BASE || 'https://cinesubz.net';
 const ASITHA_KEY = process.env.ASITHA_KEY || '';
 const ASITHA_BASE = 'https://back.asitha.top/api';
+const QUALITY = '720p'; // ✅ 720p විතරයි
 
 const headers = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
@@ -39,14 +41,12 @@ async function search(query) {
   return results.slice(0, 20);
 }
 
-/* ---------- 2. Quality links — #directdownloadlinks table parsing ---------- */
+/* ---------- 2. Quality links — 720p filter සමඟ ---------- */
 async function getQualityLinks(postUrl) {
   const { data } = await axios.get(postUrl, { headers, timeout: 20000 });
   const $ = cheerio.load(data);
   const links = [], seen = new Set();
 
-  // Primary: #directdownloadlinks table rows
-  // tr > td > a[href] (dl page) + a > strong (quality text) | td.eq(1) = size
   $('#directdownloadlinks > div > div > table > tbody > tr, #directdownloadlinks table tbody tr').each((_, el) => {
     const $tr = $(el);
     const href = $tr.find('td > a').attr('href') || '';
@@ -63,7 +63,6 @@ async function getQualityLinks(postUrl) {
     });
   });
 
-  // Fallback 1: #directdownloadlinks ඇතුළේ plain links (table නැතුව) නම්
   if (!links.length) {
     $('#directdownloadlinks a[href]').each((_, el) => {
       const href = $(el).attr('href') || '';
@@ -76,7 +75,6 @@ async function getQualityLinks(postUrl) {
     });
   }
 
-  // Fallback 2: /dl/ page links පිටත නම්
   if (!links.length) {
     $('a[href]').each((_, el) => {
       const href = $(el).attr('href') || '';
@@ -89,8 +87,13 @@ async function getQualityLinks(postUrl) {
     });
   }
 
-  const order = { '1080p': 0, '720p': 1, '480p': 2 };
-  return links.sort((a, b) => (order[a.quality] ?? 9) - (order[b.quality] ?? 9)).slice(0, 15);
+  // ✅ 720p විතරයි — 1080p/480p filter out
+  const only720 = links.filter(l => l.quality === QUALITY);
+
+  // 720p නැත්නම් පහළ quality එකක් (480p) fallback — 1080p skip (ලොකු වේගයෙන් ලොකු)
+  const fallback = only720.length ? only720 : links.filter(l => l.quality === '480p');
+
+  return (fallback.length ? fallback : links).slice(0, 5);
 }
 
 /* ---------- 3. DL page → direct link ---------- */
@@ -133,7 +136,7 @@ async function checkDirect(url) {
   return { directUrl: finalUrl, name, size };
 }
 
-/* ---------- 3c. Full resolve: dl page → direct file ---------- */
+/* ---------- 3c. Full resolve ---------- */
 async function resolveDirect(linkUrl) {
   const direct = await getDlPageDirect(linkUrl);
   try {
@@ -152,7 +155,47 @@ async function asithaDirectUrl(movieUrl) {
   return data?.direct_url || data?.url || data?.link || null;
 }
 
-/* ---------- 4. Download + Upload ---------- */
+/* ---------- 4. Convert: හැම එකක්ම proper MP4 (H.264/AAC) එකට ---------- */
+// Source mp4 (H.264) නම් fast remux — නැත්නම් re-encode
+async function convertToMp4(inputPath) {
+  const outPath = inputPath.replace(/\.[^.]+$/, '') + '.mp4';
+
+  // Step 1: fast remux (codec copy) — H.264/AAC නම් මේකෙන්ම ඇවිත් ඉවර
+  const remuxOk = await new Promise((resolve) => {
+    execFile('ffmpeg', ['-y', '-i', inputPath, '-c', 'copy', '-movflags', '+faststart', outPath],
+      { timeout: 30 * 60 * 1000 }, (err) => {
+        if (err || !fs.existsSync(outPath)) return resolve(false);
+        // ffprobe එකෙන් H.264 confirm — H.265/AV1 නම් re-encode ඕනෑ
+        execFile('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+          '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', outPath],
+        { timeout: 60 * 1000 }, (perr, stdout) => {
+          if (perr) return resolve(fs.statSync(outPath).size > 1024);
+          const codec = (stdout || '').trim();
+          if (codec === 'h264') resolve(true);
+          else { try { fs.unlinkSync(outPath); } catch (_) {} resolve(false); }
+        });
+      });
+  });
+  if (remuxOk) return { outPath, reencoded: false };
+
+  // Step 2: full re-encode → proper H.264/AAC mp4 (slow — 720p 1.6GB ~30-60min VPS එකක)
+  console.log('🎬 Re-encoding to H.264 mp4...');
+  await new Promise((resolve, reject) => {
+    execFile('ffmpeg', [
+      '-y', '-i', inputPath,
+      '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-movflags', '+faststart',
+      outPath,
+    ], { timeout: 4 * 60 * 60 * 1000 }, (err) => {
+      if (err || !fs.existsSync(outPath) || fs.statSync(outPath).size < 1024) return reject(new Error('re-encode fail'));
+      resolve();
+    });
+  });
+  return { outPath, reencoded: true };
+}
+
+/* ---------- 5. Download ---------- */
 async function downloadFile(url, filePath, onProgress) {
   const res = await axios.get(url, { headers, responseType: 'stream', timeout: 0 });
   const total = Number(res.headers['content-length']) || 0;
@@ -173,9 +216,10 @@ async function downloadFile(url, filePath, onProgress) {
   });
 }
 
-async function uploadToTelegram(ctx, filePath, name, caption) {
+/* ---------- 6. Upload — දැන් mp4 video විතරයි ---------- */
+async function uploadMp4(ctx, mp4Path, caption) {
   await ctx.replyWithVideo(
-    { source: fs.createReadStream(filePath), filename: name },
+    { source: fs.createReadStream(mp4Path) },
     { caption, supports_streaming: true, parse_mode: 'HTML' }
   );
 }
@@ -200,16 +244,12 @@ async function cmdCinesubz(ctx) {
 }
 
 async function handleCszCallback(ctx) {
-  const raw = ctx.callbackQuery.data; // 'csz_3' / 'cszq_720p_3' / 'cszu_1080p_3'
+  const raw = ctx.callbackQuery.data; // 'csz_3' / 'cszq_720p_3'
 
-  // ✅ FIX: prefix එකෙන් action detect — underscore split bug එක අයින්
   let action = '', quality = null, idx = null;
   if (raw.startsWith('cszq_')) {
     [, quality, idx] = raw.split('_');
     action = 'q';
-  } else if (raw.startsWith('cszu_')) {
-    [, quality, idx] = raw.split('_');
-    action = 'u';
   } else {
     idx = raw.replace(/^csz_/, '');
   }
@@ -219,9 +259,9 @@ async function handleCszCallback(ctx) {
   const post = cached?.v?.[idx];
   if (!post) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired. නැවත /cinesubz search කරන්න.'); }
 
-  /* Step 1: film select → quality buttons */
+  /* Step 1: film select → 720p button */
   if (!action) {
-    await ctx.answerCbQuery('⏳ Quality links බලනවා...');
+    await ctx.answerCbQuery('⏳ 720p link බලනවා...');
     try {
       const links = await getQualityLinks(post.url);
       if (!links.length) return ctx.reply(`❌ Download links හම්බුනේ නෑ.\n${post.url}`);
@@ -230,7 +270,7 @@ async function handleCszCallback(ctx) {
         text: `🎬 ${l.text.slice(0, 40)}${l.size ? ` • ${l.size}` : ''}`,
         callback_data: `cszq_${l.quality}_${idx}`,
       }]);
-      await ctx.editMessageText(`<b>${post.title}</b>\n\nQuality එකක් තෝරන්න:`, {
+      await ctx.editMessageText(`<b>${post.title}</b>\n\n720p download කරන්න:`, {
         parse_mode: 'HTML', reply_markup: { inline_keyboard: kb },
       });
     } catch (e) {
@@ -240,58 +280,44 @@ async function handleCszCallback(ctx) {
     return;
   }
 
+  /* Step 2: 720p select → resolve → download → convert mp4 → upload */
   const cached2 = cszCache.get(`l_${ctx.chat.id}`);
   const link = cached2?.v?.links.find(l => l.quality === quality);
   if (!link) { await ctx.answerCbQuery(); return ctx.reply('⌛ Expired. නැවත /cinesubz search කරන්න.'); }
+  await ctx.answerCbQuery();
 
-  /* Step 2a: quality → resolve → direct link send */
-  if (action === 'q') {
-    await ctx.answerCbQuery('🔗 Resolve කරනවා...');
-    const prog = await ctx.reply(`🔗 <b>${quality.toUpperCase()}</b> direct link resolve කරනවා...`, { parse_mode: 'HTML' });
-    try {
-      const result = await resolveDirect(link.url);
-      ctx.telegram.deleteMessage(prog.chat.id, prog.message_id).catch(() => {});
-      const sizeStr = result.size ? `\n📦 Size: <b>${(result.size / (1024 * 1024)).toFixed(0)} MB</b>` : (link.size ? `\n📦 Size: <b>${link.size}</b>` : '');
-      await ctx.reply(
-        `🎬 <b>${post.title}</b>\n🎥 <b>${link.text || quality.toUpperCase()}</b>${sizeStr}\n\n` +
-        `🔗 <a href="${result.directUrl}">Direct Download Link</a>\n\n` +
-        `💡 Link පැය කිපයකින් expire වෙනවා.`,
-        { parse_mode: 'HTML', disable_web_page_preview: true,
-          reply_markup: { inline_keyboard: [[{ text: '⬆️ Telegram එකට Upload කරන්න', callback_data: `cszu_${quality}_${idx}` }]] } }
-      );
-    } catch (e) {
-      console.error('csz resolve:', e.message);
-      ctx.telegram.deleteMessage(prog.chat.id, prog.message_id).catch(() => {});
-      try {
-        const fb = await asithaDirectUrl(post.url);
-        if (fb) return ctx.reply(`🔗 Fallback Direct Link:\n\n<a href="${fb}">Direct Download</a>`, { parse_mode: 'HTML', disable_web_page_preview: true });
-      } catch (_) {}
-      ctx.reply(`⚠️ Resolve fail.\n💡 Manual page: ${link.url}`);
-    }
-    return;
-  }
+  const prog = await ctx.reply(`⬇️ <b>${link.text || QUALITY}</b> download... 0%`, { parse_mode: 'HTML' });
+  const tmp = path.join(os.tmpdir(), `csz_${Date.now()}_${quality}` + path.extname(link.url.split('?')[0]) || '.mp4');
+  try {
+    // 1) resolve
+    const result = await resolveDirect(link.url);
 
-  /* Step 2b: Upload button → download → Telegram upload */
-  if (action === 'u') {
-    await ctx.answerCbQuery();
-    const prog = await ctx.reply(`⬇️ <b>${quality.toUpperCase()}</b> download... 0%`, { parse_mode: 'HTML' });
-    const tmp = path.join(os.tmpdir(), `csz_${Date.now()}_${quality}.mp4`);
-    try {
-      const result = await resolveDirect(link.url);
-      await downloadFile(result.directUrl, tmp, (pct) => {
-        ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
-          `⬇️ Download: ${pct}%\n🎬 ${post.title}`, { parse_mode: 'HTML' }).catch(() => {});
-      });
-      ctx.telegram.editMessageText(prog.chat.id, prog.message_id, '⬆️ Upload...', { parse_mode: 'HTML' }).catch(() => {});
-      await uploadToTelegram(ctx, tmp, result.name,
-        `🎬 <b>${post.title}</b>\n🎥 <b>${link.text || quality.toUpperCase()}</b>`);
-      fs.unlink(tmp, () => {});
-      ctx.telegram.deleteMessage(prog.chat.id, prog.message_id).catch(() => {});
-    } catch (e) {
-      console.error('csz upload:', e.message);
-      fs.unlink(tmp, () => {});
-      ctx.reply(`⚠️ Upload fail: ${e.message}\n\n💡 50MB+ files වලට LOCAL BOT API SERVER ඕනෑ.`);
-    }
+    // 2) download
+    await downloadFile(result.directUrl, tmp, (pct) => {
+      ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
+        `⬇️ Download: ${pct}%\n🎬 ${post.title}`, { parse_mode: 'HTML' }).catch(() => {});
+    });
+
+    // 3) convert → proper mp4
+    ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
+      '🎬 MP4 එකට convert කරනවා... (mkv නම් ටිකක් යනවා)', { parse_mode: 'HTML' }).catch(() => {});
+    const conv = await convertToMp4(tmp);
+    console.log(`✅ Convert ${conv.reencoded ? '(re-encoded)' : '(remuxed)'}: ${conv.outPath}`);
+
+    // 4) upload mp4 video (streaming)
+    ctx.telegram.editMessageText(prog.chat.id, prog.message_id,
+      '⬆️ Telegram එකට upload... (ලොකු file නම් 10-30min)', { parse_mode: 'HTML' }).catch(() => {});
+    await uploadMp4(ctx, conv.outPath,
+      `🎬 <b>${post.title}</b>\n🎥 <b>${link.text || QUALITY}</b> • MP4`);
+
+    // 5) cleanup
+    fs.unlink(tmp, () => {});
+    if (conv.outPath !== tmp) fs.unlink(conv.outPath, () => {});
+    ctx.telegram.deleteMessage(prog.chat.id, prog.message_id).catch(() => {});
+  } catch (e) {
+    console.error('csz flow:', e.message);
+    fs.unlink(tmp, () => {});
+    ctx.reply(`⚠️ Fail: ${e.message}\n\n💡 50MB+ uploads වලට LOCAL BOT API SERVER ඕනෑ.`);
   }
 }
 
