@@ -8,7 +8,17 @@ const headers = {
   'Accept-Language': 'en-US,en;q=0.9,si;q=0.8',
 };
 
-// ✅ නිවැරදි මාර්ගය: /search/<query>
+// ✅ Module-level cache (chat_id -> { results, time }) — session ඕනි නෑ
+const cszCache = new Map();
+
+function cacheSet(chatId, results, ttl = 30 * 60 * 1000) {
+  cszCache.set(chatId, { results, time: Date.now() });
+  setTimeout(() => {
+    const c = cszCache.get(chatId);
+    if (c && c.time <= Date.now() - ttl) cszCache.delete(chatId);
+  }, ttl).unref?.();
+}
+
 async function search(query) {
   const { data } = await axios.get(
     `${BASE}/search/${encodeURIComponent(query)}`,
@@ -20,47 +30,37 @@ async function search(query) {
 function parseResults(html) {
   const $ = cheerio.load(html);
   const results = [];
+  const seen = new Set();
 
-  // MviCard තේමා කාඩ්පත්: h2/h3 මාතෘකා සහ කාඩ්පත් කාඩ්පත් රූපය
-  const cards = $(
-    '.video-box, .card, article, .mvicard'
-  ).toArray();
+  // CineSubz theme: card container එකේ title link එක h2/h3 ඇතුළේ තියෙනවා.
+  // Nav/footer links filter කරනවා — posts විතරක් ගන්නවා.
+  $('a[href*="cinesubz"]').each((_, el) => {
+    const $a = $(el);
+    const href = $a.attr('href') || '';
+    const title = ($a.find('h2, h3').first().text() || '').trim()
+      || $a.attr('title')?.trim()
+      || '';
 
-  cards.forEach((el) => {
-    const $c = $(el);
-    const a = $c.find('a[href]').first();
-    const href = a.attr('href');
-    let title = ($c.find('h2, h3').first().text() || a.text()).trim();
-    if (!href || !title || title.length < 8) return;
-    // නිත්‍ය නිවාරණ: බාගත නොකරන කාඩ්පත් නිත්‍ය විනිශ්චය
-    if (/privacy|terms|contact|account|login|genre|release|keyword/i.test(title)) return;
-    if (results.find(r => r.title === title)) return;
+    if (!title || title.length < 8) return;
+    if (seen.has(href)) return;
 
-    const img = $c.find('img').first();
+    // Post URL pattern filter: /search|genre|release|keyword|account|wp-|category|# වගේ ඒවා නම් skip
+    if (/\/(search|genre|release|keyword|account|category|tags?|wp-|page)\//i.test(href)) return;
+    if (/#|javascript:/i.test(href)) return;
+    // Movie post URL විතරක්: domain root එකෙන් පස්සේ single path segment හෝ movie slug
+    if (!/^https?:\/\/[^/]+\/[^/]+\/?$/.test(href.replace(/\/$/, '') + '/')) {
+      // deep path නම්ත් post එකක් වෙන්න පුළුවන් — root-level nav නම් skip කරන්න
+      if (/\/(movies|tvshows|contact-us|privacy-policy|terms-of-service)\/?$/i.test(href)) return;
+    }
+
+    const img = $a.find('img').first();
+    seen.add(href);
     results.push({
       title,
-      url: href.startsWith('http') ? href : new URL(href, BASE).href,
+      url: href,
       thumb: img.attr('src') || img.attr('data-src') || null,
     });
   });
-
-  // කාඩ්පත් කාඩ්පත් අසාර්ථක වුණොත් fallback: කාඩ්පත් පොදු කාඩ්පත් රූප ලක්ෂණ
-  if (!results.length) {
-    $('a[href]').each((_, el) => {
-      const $a = $(el);
-      const href = $a.attr('href') || '';
-      const title = $a.find('h2, h3').first().text().trim() || $a.text().trim();
-      if (title.length < 8) return;
-      if (/privacy|terms|contact|account|login|genre|release|keyword|nav/i.test(href + title)) return;
-      if (results.find(r => r.title === title)) return;
-      const img = $a.find('img').first();
-      results.push({
-        title,
-        url: href.startsWith('http') ? href : new URL(href, BASE).href,
-        thumb: img.attr('src') || img.attr('data-src') || null,
-      });
-    });
-  }
 
   return results.slice(0, 20);
 }
@@ -69,11 +69,13 @@ async function getDetails(postUrl) {
   const { data } = await axios.get(postUrl, { headers, timeout: 20000 });
   const $ = cheerio.load(data);
   const links = [];
+  const seen = new Set();
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
     const text = $(el).text().trim();
     if (/\.zip($|\?)|\.rar($|\?)|\.srt($|\?)|download-sub|sub[-_]download|\/download\//i.test(href)) {
-      if (!links.find(l => l.url === href)) {
+      if (!seen.has(href)) {
+        seen.add(href);
         links.push({ text: text || 'Download', url: href });
       }
     }
@@ -89,16 +91,17 @@ async function cmdCinesubz(ctx) {
   const wait = await ctx.reply('🔎 CineSubz එකේ search කරනවා...');
   try {
     const results = await search(query);
+    await ctx.telegram.deleteMessage(wait.chat.id, wait.message_id).catch(() => {});
+
     if (!results.length) {
-      await ctx.telegram.deleteMessage(wait.chat.id, wait.message_id);
       return ctx.reply(`❌ "${query}" වලට results හම්බුනේ නෑ.`);
     }
-    await ctx.telegram.deleteMessage(wait.chat.id, wait.message_id);
+
+    cacheSet(ctx.chat.id, results);
+
     const buttons = results.slice(0, 10).map((r, i) => [
       { text: r.title.slice(0, 60), callback_data: `csz_${i}` },
     ]);
-    ctx.session = ctx.session || {};
-    ctx.session.cszResults = results;
     await ctx.reply(`🎬 <b>${query}</b> - results:`, {
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: buttons },
@@ -112,9 +115,13 @@ async function cmdCinesubz(ctx) {
 
 async function handleCszCallback(ctx) {
   const i = parseInt(ctx.callbackQuery.data.replace('csz_', ''), 10);
-  const results = ctx.session?.cszResults || [];
-  const post = results[i];
-  if (!post) return ctx.answerCbQuery('Expired. නැවත /cinesubz කරන්න.');
+  const cached = cszCache.get(ctx.chat?.id || ctx.from?.id);
+  const post = cached?.results?.[i];
+
+  if (!post) {
+    await ctx.answerCbQuery();
+    return ctx.reply('⌛ Request එක expired. නැවත /cinesubz search කරන්න.');
+  }
   await ctx.answerCbQuery('⏳ බලනවා...');
   try {
     const links = await getDetails(post.url);
