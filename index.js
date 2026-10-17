@@ -1,4 +1,4 @@
-// index.js — Modular v7.6 (+ YouTube /yt search & download)
+// index.js — Modular v7.7 (+ Baiscope Sinhala Subtitles /sub)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -8,6 +8,7 @@ const { cmdCinesubz, handleCszCallback } = require('./handlers/cinesubz');
 const { cmdSinhalasub, handleSsCallback } = require('./handlers/sinhalasub');
 const { cmdMoviebox, handleMbCallback } = require('./handlers/moviebox');
 const { cmdYt, handleYtCallback } = require('./handlers/yt');
+const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
@@ -54,6 +55,7 @@ bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand(ctx));
 bot.command('yt', (ctx) => cmdYt(ctx));                    // YouTube search + download
+bot.command('sub', (ctx) => cmdSub(ctx));                  // Baiscope සිංහල subtitles
 bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
@@ -76,6 +78,9 @@ bot.on('text', (ctx) => {
 /* ================= Callback routing ================= */
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
+
+  // Baiscope callbacks (bsc_)
+  if (data.startsWith('bsc_')) return handleSubCallback(ctx);
 
   // YouTube callbacks (ytsel_ / ytv_ / yta_)
   if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
@@ -102,7 +107,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.6 + YouTube'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.7 + Baiscope Subtitles'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGTERM') => bot.stop('SIGTERM'));
