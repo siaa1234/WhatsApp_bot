@@ -1,5 +1,6 @@
-// handlers/ytm.js — YouTube Music search + MP3 download (InnerTube + yt-dlp)
+// handlers/ytm.js — YouTube Music search + MP3 download (InnerTube + yt-dlp fallback)
 const { execFile } = require('child_process');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
@@ -41,28 +42,59 @@ function runYtdlp(args) {
 // ---------- YouTube Music search (InnerTube WEB_REMIX) ----------
 const INNERTUBE_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
 const CONTEXT = {
-  client: { clientName: 'WEB_REMIX', clientVersion: '1.20240401.01.00', hl: 'en', gl: 'LK' }
+  context: {
+    client: {
+      clientName: 'WEB_REMIX',
+      clientVersion: '1.20250310.01.00',
+      hl: 'en',
+      gl: 'LK',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
+      originalUrl: 'https://music.youtube.com/'
+    },
+    user: { lockedSafetyMode: false }
+  }
 };
+
+// node-youtube-music project එකෙන් verified "songs" filter params
+const SONGS_PARAMS = 'EgWKAQIIAWoKEAoQCRADEAQQBQ%3D%3D';
+
+function joinRuns(col) {
+  return (col?.musicResponsiveListItemColumn?.text?.runs || [])
+    .map(r => r.text).join(' ').trim();
+}
 
 async function searchYtMusic(query, limit = 10) {
   const { data } = await axios.post(
-    `https://music.youtube.com/youtubei/v1/search?key=${INNERTUBE_KEY}`,
-    { context: CONTEXT, query, params: 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D' }, // songs filter
-    { headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }
+    `https://music.youtube.com/youtubei/v1/search?alt=json&key=${INNERTUBE_KEY}`,
+    { ...CONTEXT, query, params: SONGS_PARAMS },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'Origin': 'https://music.youtube.com'
+      },
+      timeout: 15000
+    }
   );
 
   const results = [];
   const walk = (o) => {
     if (!o || typeof o !== 'object') return;
+    if (Array.isArray(o)) { o.forEach(walk); return; }
     if (o.musicResponsiveListItemRenderer) {
       const r = o.musicResponsiveListItemRenderer;
-      const videoId = r.playlistItemData?.videoId || r.overlay?.[0]?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId;
-      const title = r.flexColumns?.[0]?.musicResponsiveListItemColumn?.text?.runs?.[0]?.text;
+      const videoId =
+        r.playlistItemData?.videoId ||
+        r.overlay?.[0]?.musicItemThumbnailOverlayRenderer?.content
+          ?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId ||
+        r.flexColumns?.[0]?.musicResponsiveListItemColumn?.text?.runs?.[0]
+          ?.navigationEndpoint?.watchEndpoint?.videoId;
+      const title = joinRuns(r.flexColumns?.[0] || {});
       if (videoId && title) {
         const cols = r.flexColumns || [];
-        const artist = cols[1]?.musicResponsiveListItemColumn?.text?.runs?.[0]?.text || '';
-        const durText = cols[cols.length - 1]?.musicResponsiveListItemColumn?.text?.runs?.[0]?.text || '';
-        const dm = durText.match(/^(\d+):(\d{2})$/);
+        const artist = cols.slice(1).map(joinRuns).filter(Boolean).join(' · ');
+        const durText = joinRuns(cols[cols.length - 1] || {});
+        const dm = durText.match(/(\d+):(\d{2})/);
         results.push({
           videoId, title, artist,
           duration: dm ? Number(dm[1]) * 60 + Number(dm[2]) : null,
@@ -70,15 +102,43 @@ async function searchYtMusic(query, limit = 10) {
         });
       }
     }
-    for (const k of Object.keys(o)) walk(o[k]);
+    Object.values(o).forEach(walk);
   };
   walk(data);
+
+  console.log(`[ytm] InnerTube results: ${results.length}`);
   return results.slice(0, limit);
+}
+
+// ---------- Fallback: yt-dlp search (InnerTube empty/fail නම්) ----------
+async function searchViaYtdlp(query, limit = 10) {
+  const out = await runYtdlp(['--dump-json', '--no-warnings', '--flat-playlist',
+    `ytsearch${limit}:${query}`]);
+  const items = out.trim().split('\n').filter(Boolean).map(l => {
+    try { return JSON.parse(l); } catch { return null; }
+  }).filter(Boolean);
+  return items.map(v => ({
+    videoId: v.id,
+    title: v.title,
+    artist: v.uploader || '',
+    duration: v.duration,
+    url: v.url || `https://www.youtube.com/watch?v=${v.id}`
+  }));
+}
+
+async function searchSongs(query) {
+  try {
+    const r = await searchYtMusic(query);
+    if (r.length) return { source: 'ytm', results: r };
+  } catch (e) {
+    console.log('[ytm] InnerTube failed:', e.message);
+  }
+  return { source: 'yt', results: await searchViaYtdlp(query) };
 }
 
 // ---------- MP3 download (best quality + cover art) ----------
 async function downloadMp3(url, title) {
-  const dir = path.join(require('os').tmpdir(), 'ytm_' + Date.now());
+  const dir = path.join(os.tmpdir(), 'ytm_' + Date.now());
   fs.mkdirSync(dir, { recursive: true });
   const safe = title.replace(/[^\w\s()-]/g, '').slice(0, 60).trim() || 'song';
   const args = [
@@ -107,21 +167,22 @@ async function cmdSong(ctx) {
 
   const status = await ctx.reply(`🎧 YouTube Music එකේ "${esc(arg)}" search කරනවා...`);
   try {
-    const results = await searchYtMusic(arg);
+    const { source, results } = await searchSongs(arg);
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-    if (!results.length) return ctx.reply('❌ Results නැහැ.');
+    if (!results.length) return ctx.reply('❌ Results නැහැ. වෙන text එකක් try කරන්න.');
 
     const id = createId();
     pending.set(id, results);
     setTimeout(() => pending.delete(id), 600000).unref?.();
 
+    const header = source === 'ytm' ? '🎶 YouTube Music:' : '🎶 YouTube (fallback):';
     const keyboard = {
       inline_keyboard: results.map((r, i) => [{
-        text: `🎵 ${r.title.slice(0, 35)} — ${r.artist.slice(0, 20)}${r.duration ? ` [${fmtDur(r.duration)}]` : ''}`,
+        text: `🎵 ${r.title.slice(0, 35)} — ${String(r.artist).slice(0, 20)}${r.duration ? ` [${fmtDur(r.duration)}]` : ''}`,
         callback_data: `ytm_${id}_${i}`
       }])
     };
-    return ctx.reply('🎶 Song එකක් තෝරන්න (MP3):', { reply_markup: keyboard });
+    return ctx.reply(`${header}\n👇 Song එකක් තෝරන්න (MP3):`, { reply_markup: keyboard });
   } catch (e) {
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
     return ctx.reply(`❌ Search error: ${e.message}`);
