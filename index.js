@@ -1,4 +1,4 @@
-// index.js — Modular v7.8 (+ Baiscope /sub, YouTube /yt, global error handler)
+// index.js — Modular v7.9 (+ Baiscope /sub, YouTube /yt, YouTube Music /song, global error handler)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -9,6 +9,7 @@ const { cmdSinhalasub, handleSsCallback } = require('./handlers/sinhalasub');
 const { cmdMoviebox, handleMbCallback } = require('./handlers/moviebox');
 const { cmdYt, handleYtCallback } = require('./handlers/yt');
 const { cmdSub, handleSubCallback } = require('./handlers/baiscope');
+const { cmdSong, handleYtmCallback } = require('./handlers/ytm');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
@@ -61,6 +62,7 @@ bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand(ctx));
 bot.command('yt', (ctx) => cmdYt(ctx));
+bot.command('song', (ctx) => cmdSong(ctx));
 bot.command('sub', (ctx) => cmdSub(ctx));
 bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
@@ -96,6 +98,11 @@ bot.on('callback_query', (ctx) => {
     return handleYtCallback(ctx);
   }
 
+  // YouTube Music /song callbacks — මේක yta_ එකට කලින් check කරන්න
+  // (ytm_ prefix එක yta_/ytv_ වලට conflict නැති නිසා පිළිවෙල ගැටලුවක් නෑ, ඒත්
+  // clarity වෙනුවෙන් මෙතන තියනවා)
+  if (data.startsWith('ytm_')) return handleYtmCallback(ctx);
+
   if (data.startsWith('ssq_')) return handleSsCallback(ctx);
   if (data.startsWith('ss_')) return handleSsCallback(ctx);
 
@@ -113,7 +120,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.8'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.9 (+ /song)'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
