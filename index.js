@@ -1,4 +1,4 @@
-// index.js — Modular v7.7 (+ Baiscope Sinhala Subtitles /sub)
+// index.js — Modular v7.8 (+ Baiscope /sub, YouTube /yt, global error handler)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -16,11 +16,9 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN not set!');
 /* ================= Local Bot API Server (2GB upload limit) =================
  * BOT_API_SERVER set කරාගෙත් cloud limit (50MB) වෙනුවට local server (2GB) එකෙන්
  * API calls යනවා. නැත්නම් cloud default (api.telegram.org) use වෙනවා.
- * උදා: BOT_API_SERVER=http://localhost:8081
  */
 const API_ROOT = process.env.BOT_API_SERVER || 'https://api.telegram.org';
 
-// Cloud token එකක් local server එකේ use කරනවා නම් මුලින්ම logOut + logIn ඕනෑ
 async function registerLocalToken(apiRoot, token) {
   const axios = require('axios');
   try {
@@ -41,7 +39,7 @@ async function registerLocalToken(apiRoot, token) {
 /* ================= Bot instance ================= */
 const bot = new Telegraf(BOT_TOKEN, {
   apiRoot: API_ROOT,
-  handlerTimeout: 900000, // 15 min — download+upload pipeline වලට
+  handlerTimeout: 900000
 });
 
 if (process.env.BOT_API_SERVER) {
@@ -50,17 +48,25 @@ if (process.env.BOT_API_SERVER) {
   });
 }
 
+/* ================= Global error handler ================= */
+bot.catch((err, ctx) => {
+  console.error('❌ Bot error:', err);
+  try {
+    ctx.reply(`⚠️ Bot error: ${err.message || 'Unknown error'}`);
+  } catch {}
+});
+
 /* ================= Commands ================= */
 bot.start((ctx) => aliveHandler(ctx));
 bot.command('alive', (ctx) => aliveHandler(ctx));
 bot.command('dl', (ctx) => handleDlCommand(ctx));
-bot.command('yt', (ctx) => cmdYt(ctx));                    // YouTube search + download
-bot.command('sub', (ctx) => cmdSub(ctx));                  // Baiscope සිංහල subtitles
+bot.command('yt', (ctx) => cmdYt(ctx));
+bot.command('sub', (ctx) => cmdSub(ctx));
 bot.command('share', (ctx) => cmdShare(ctx));
 bot.command('id', (ctx) => cmdId(ctx));
 bot.command('cinesubz', (ctx) => cmdCinesubz(ctx));
-bot.command('ss', (ctx) => cmdSinhalasub(ctx));          // sinhalasub.lk search
-bot.command('mb', (ctx) => cmdMoviebox(ctx));            // MovieBox (themoviebox.xyz)
+bot.command('ss', (ctx) => cmdSinhalasub(ctx));
+bot.command('mb', (ctx) => cmdMoviebox(ctx));
 
 /* ================= Text routing ================= */
 bot.on('text', (ctx) => {
@@ -79,25 +85,20 @@ bot.on('text', (ctx) => {
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
 
-  // Baiscope callbacks (bsc_)
   if (data.startsWith('bsc_')) return handleSubCallback(ctx);
 
-  // YouTube callbacks (ytsel_ / ytv_ / yta_)
   if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
     return handleYtCallback(ctx);
   }
 
-  // sinhalasub.lk callbacks (ss_ / ssq_)
-  if (data.startsWith('ssq_')) return handleSsCallback(ctx); // quality → download+upload
-  if (data.startsWith('ss_')) return handleSsCallback(ctx);  // movie → quality select
+  if (data.startsWith('ssq_')) return handleSsCallback(ctx);
+  if (data.startsWith('ss_')) return handleSsCallback(ctx);
 
-  // cinesubz callbacks (csz_ / cszq_)
-  if (data.startsWith('cszq_')) return handleCszCallback(ctx); // quality → download+upload
-  if (data.startsWith('csz_')) return handleCszCallback(ctx);  // movie → quality select
+  if (data.startsWith('cszq_')) return handleCszCallback(ctx);
+  if (data.startsWith('csz_')) return handleCszCallback(ctx);
 
-  // MovieBox callbacks (mb_ / mbq_)
-  if (data.startsWith('mbq_')) return handleMbCallback(ctx); // quality → download+upload
-  if (data.startsWith('mb_')) return handleMbCallback(ctx);  // movie → quality select
+  if (data.startsWith('mbq_')) return handleMbCallback(ctx);
+  if (data.startsWith('mb_')) return handleMbCallback(ctx);
 
   if (data.startsWith('vid_') || data.startsWith('aud_')) {
     return handleDlCallback(ctx);
@@ -107,7 +108,7 @@ bot.on('callback_query', (ctx) => {
 });
 
 /* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.7 + Baiscope Subtitles'));
+bot.launch().then(() => console.log('Bot Started ✅ Modular v7.8'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
