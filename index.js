@@ -110,4 +110,4 @@ bot.on('callback_query', (ctx) => {
 bot.launch().then(() => console.log('Bot Started ✅ Modular v7.7 + Baiscope Subtitles'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM') => bot.stop('SIGTERM'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
