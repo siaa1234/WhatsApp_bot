@@ -8,7 +8,7 @@ const axios = require('axios');
 const MAX_TG_SIZE = process.env.LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
 
 const BASE_ARGS = [
-  '--extractor-args', 'youtube:player_client=default,web_safari;formats=duplicate,missing_pot',
+  '--extractor-args', 'youtube:player_client=tv,web_safari,ios;formats=duplicate,missing_pot',
   '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
   '--force-ipv4', '--retries', '3', '--socket-timeout', '20', '--no-warnings'
 ];
