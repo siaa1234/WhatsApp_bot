@@ -1,4 +1,4 @@
-// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2)
+// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.1)
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -29,7 +29,6 @@ async function searchBaiscope(query) {
 
   $('a[href*="/movies/"], a[href*="/tv/"]').each((i, el) => {
     const href = $(el).attr('href') || '';
-    // thumb/logo links නෙවෙයි — text එකක් තියෙන link විතරක්
     const text = ($(el).attr('title') || $(el).text() || '').trim();
     if (!text || text.length < 5) return;
     if (seen.has(href)) return;
@@ -55,11 +54,11 @@ async function getSubtitleLink(pageUrl) {
     const text = ($(el).text() || '').toLowerCase();
     const lower = href.toLowerCase();
 
-    // ✅ REAL subtitle links විතරක් ගන්න:
+    // ✅ REAL subtitle links විතරක්:
     const isReal =
-      lower.includes('dl.baiscope.lk') ||          // dl subdomain
-      lower.includes('/download') ||               // /download path
-      /\.(zip|rar|7z|srt)(\?|$)/.test(lower);      // direct file
+      lower.includes('dl.baiscope.lk') ||
+      lower.includes('/download') ||
+      /\.(zip|rar|7z|srt)(\?|$)/.test(lower);
 
     // ❌ Ads / social / internal links exclude:
     const isJunk =
@@ -70,7 +69,7 @@ async function getSubtitleLink(pageUrl) {
       lower.includes('/category/') || lower.includes('/tag/') ||
       href === '#' || lower.startsWith('javascript') ||
       lower.includes('bit.ly') || lower.includes('cutt.ly') ||
-      lower.includes('shrinkme') || lower.includes('clicknupload') === false && false;
+      lower.includes('shrinkme');
 
     if (isReal && !isJunk) {
       seen.add(href);
@@ -79,7 +78,7 @@ async function getSubtitleLink(pageUrl) {
     }
   });
 
-  // priority sort: dl.baiscope direct file links උඩින්ම
+  // priority sort: dl.baiscope direct links උඩින්ම
   links.sort((a, b) => {
     const score = u => u.url.toLowerCase().includes('dl.baiscope') ? 0 :
       /\.(zip|rar|7z|srt)/.test(u.url.toLowerCase()) ? 1 :
@@ -104,7 +103,7 @@ async function downloadSubtitle(url, referer) {
     maxRedirects: 5
   });
 
-  // ලැබුණේ HTML page එකක් නම් (redirect/ad page) — fail කරන්න
+  // ලැබුණේ HTML page එකක් නම් (ad/redirect page) — fail කරන්න
   const ct = headers['content-type'] || '';
   if (ct.includes('text/html')) throw new Error('INTERMEDIATE_PAGE');
 
@@ -150,92 +149,111 @@ async function cmdSub(ctx) {
     return ctx.reply('👇 Movie/Series එකක් තෝරන්න:', { reply_markup: keyboard });
   } catch (e) {
     await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+    console.log('[baiscope] search failed:', e.message);
     return ctx.reply(`❌ Search error: ${e.message}`);
   }
 }
 
+// ---------- Callbacks ----------
 async function handleSubCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
-  await ctx.answerCbQuery().catch(() => {});
+  console.log('[baiscope] callback:', data);
+  await ctx.answerCbQuery().catch(e => console.log('[baiscope] answerCb fail:', e.message));
 
-  if (!data.startsWith('bsc_')) return;
+  try {
+    // ----- Download link select (bscd_) -----
+    if (data.startsWith('bscd_')) {
+      const [, id, idx] = data.split('_');
+      const cached = pending.get(id);
+      if (!cached) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
 
-  // bsc_ + dl link pick (bscd_) or movie pick
-  if (data.startsWith('bscd_')) {
-    const [, id, idx] = data.split('_');
-    const cached = pending.get(id);
-    if (!cached) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
-    const dl = cached.links[Number(idx)];
-    if (!dl) return ctx.reply('❌ Link එක හමු වුණේ නැහැ.');
+      const dl = cached.links[Number(idx)];
+      if (!dl) return ctx.reply('❌ Link එක හමු වුණේ නැහැ.');
 
-    const status = await ctx.reply('⏳ Subtitle download කරනවා...');
-    try {
-      const filePath = await downloadSubtitle(dl.url, cached.pageUrl);
-      await ctx.replyWithDocument(
-        { source: fs.createReadStream(filePath), filename: path.basename(dl.url) || 'subtitle.zip' },
-        { caption: `✅ ${cached.title}\nPOWERED BY CINEMAX` }
-      );
-      try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
-      await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-    } catch (e) {
-      await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-      return ctx.reply(
-        `⚠️ Direct download වැඩ කරන්නේ නැහැ (${e.message === 'INTERMEDIATE_PAGE' ? 'ad/redirect page එකක්' : e.message}).\n\n📥 Browser එකෙන් ගන්න:\n${dl.url}`
-      );
-    }
-    return;
-  }
+      console.log('[baiscope] downloading:', dl.url);
 
-  if (data.startsWith('bsc_')) {
-    const [, id, idx] = data.split('_');
-    const results = pending.get(id);
-    if (!results) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
+      const status = await ctx.reply('⏳ Subtitle download කරනවා...');
 
-    const picked = results[Number(idx)];
-    if (!picked) return ctx.reply('❌ Result එක හමු වුණේ නැහැ.');
-
-    const status = await ctx.reply('🔍 Subtitle link එක හොයනවා...');
-    try {
-      const info = await getSubtitleLink(picked.url);
-      await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-
-      const caption =
-        `🎬 <b>${esc(info.title)}</b>\n` +
-        `📝 සිංහල උපසිරැසි\n` +
-        `🔗 ${esc(picked.url)}`;
-
-      if (info.poster) {
-        try {
-          await ctx.replyWithPhoto(info.poster, { caption, parse_mode: 'HTML' });
-        } catch {
-          await ctx.reply(caption, { parse_mode: 'HTML' });
-        }
-      } else {
-        await ctx.reply(caption, { parse_mode: 'HTML' });
-      }
-
-      if (!info.links.length) {
-        console.log('[baiscope] no links found for', picked.url);
+      let filePath = null;
+      try {
+        filePath = await downloadSubtitle(dl.url, cached.pageUrl);
+      } catch (e) {
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+        console.log('[baiscope] download failed:', e.message);
         return ctx.reply(
-          '❌ මේ page එකේ subtitle link එක auto-detect කරන්න බැහැ.\n\n📥 Browser එකෙන් ගන්න:\n' + picked.url
+          `⚠️ Direct download fail වුණා.\n\n📥 Browser එකෙන් ගන්න:\n${dl.url}`
         );
       }
 
-      const linkId = createId();
-      pending.set(linkId, { ...info, pageUrl: picked.url });
-      setTimeout(() => pending.delete(linkId), 600000).unref?.();
-
-      const keyboard = {
-        inline_keyboard: info.links.slice(0, 5).map((l, i) => [{
-          text: (l.label || 'Download').slice(0, 40),
-          callback_data: `bscd_${linkId}_${i}`
-        }])
-      };
-      return ctx.reply(`📥 Download link ${info.links.length}ක් හමු වුණා — එකක් තෝරන්න:`, { reply_markup: keyboard });
-    } catch (e) {
-      await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
-      return ctx.reply(`❌ ${e.message}`);
+      try {
+        console.log('[baiscope] uploading file:', filePath);
+        await ctx.replyWithDocument(
+          { source: fs.createReadStream(filePath) },
+          { caption: `✅ ${cached.title}\nPOWERED BY CINEMAX` }
+        );
+      } catch (e) {
+        console.log('[baiscope] upload failed:', e.message);
+        return ctx.reply(`⚠️ Upload fail: ${e.message}\n\n📥 Link:\n${dl.url}`);
+      } finally {
+        try { fs.rmSync(path.dirname(filePath), { recursive: true, force: true }); } catch {}
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+      }
+      return;
     }
+
+    // ----- Movie select (bsc_) -----
+    if (data.startsWith('bsc_')) {
+      const [, id, idx] = data.split('_');
+      const results = pending.get(id);
+      if (!results) return ctx.reply('⌛ Expired. නැවත /sub කරන්න.');
+
+      const picked = results[Number(idx)];
+      if (!picked) return ctx.reply('❌ Result එක හමු වුණේ නැහැ.');
+
+      const status = await ctx.reply('🔍 Subtitle link එක හොයනවා...');
+      try {
+        const info = await getSubtitleLink(picked.url);
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+
+        const caption =
+          `🎬 <b>${esc(info.title)}</b>\n` +
+          `📝 සිංහල උපසිරැසි\n` +
+          `🔗 ${esc(picked.url)}`;
+
+        try {
+          if (info.poster) await ctx.replyWithPhoto(info.poster, { caption, parse_mode: 'HTML' });
+          else await ctx.reply(caption, { parse_mode: 'HTML' });
+        } catch {
+          await ctx.reply(caption, { parse_mode: 'HTML' });
+        }
+
+        if (!info.links.length) {
+          console.log('[baiscope] no links found for', picked.url);
+          return ctx.reply('❌ Subtitle link auto-detect කරන්න බැහැ.\n\n📥 Browser එකෙන් ගන්න:\n' + picked.url);
+        }
+
+        const linkId = createId();
+        pending.set(linkId, { ...info, pageUrl: picked.url });
+        setTimeout(() => pending.delete(linkId), 600000).unref?.();
+
+        const keyboard = {
+          inline_keyboard: info.links.slice(0, 5).map((l, i) => [{
+            text: (l.label || 'Download').slice(0, 40),
+            callback_data: `bscd_${linkId}_${i}`
+          }])
+        };
+        return ctx.reply(`📥 ${info.links.length} links හමු වුණා — එකක් තෝරන්න:`, { reply_markup: keyboard });
+      } catch (e) {
+        await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
+        console.log('[baiscope] link scrape failed:', e.message);
+        return ctx.reply(`❌ ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.error('[baiscope] handler crash:', e);
+    try {
+      return await ctx.reply(`⚠️ Error: ${e.message}`);
+    } catch {}
   }
 }
 
