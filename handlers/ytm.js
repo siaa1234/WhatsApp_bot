@@ -1,4 +1,4 @@
-// handlers/ytm.js — YouTube Music search + MP3 download (InnerTube + yt-dlp fallback)
+// handlers/ytm.js — YouTube Music search + MP3 download (InnerTube + yt-dlp multi-client fallback)
 const { execFile } = require('child_process');
 const os = require('os');
 const path = require('path');
@@ -7,8 +7,8 @@ const axios = require('axios');
 
 const MAX_TG_SIZE = process.env.LOCAL_BOT_API ? 1900 * 1024 * 1024 : 48 * 1024 * 1024;
 
+// NOTE: --extractor-args මෙතන නෑ — fallback chain එකේදී per-client විදිහට දානවා
 const BASE_ARGS = [
-  '--extractor-args', 'youtube:player_client=tv,web_safari,ios;formats=duplicate,missing_pot',
   '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
   '--force-ipv4', '--retries', '3', '--socket-timeout', '20', '--no-warnings'
 ];
@@ -25,18 +25,55 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function runYtdlp(args) {
+// ---------- Single yt-dlp run (base) ----------
+function runYtdlpBase(args) {
   return new Promise((resolve, reject) => {
     execFile('yt-dlp', [...BASE_ARGS, ...args], { maxBuffer: 64 * 1024 * 1024, timeout: 540000 },
       (err, stdout, stderr) => {
         if (err) {
           const msg = stderr || err.message;
-          if (/Sign in to confirm/.test(msg)) return reject(new Error('YouTube IP block — YT_COOKIES_B64 දාන්න.'));
+          if (/Sign in to confirm/.test(msg)) return reject(new Error('IP_BLOCK'));
           return reject(new Error(msg.slice(-400)));
         }
         resolve(stdout);
       });
   });
+}
+
+// ---------- Multi-client download with fallback ----------
+// එක client එකක් "Sign in to confirm" block වුණාම ඊළඟ එක try කරනවා.
+const CLIENTS = ['tv', 'web_safari', 'ios', 'mweb'];
+
+function withClient(args, client) {
+  return ['--extractor-args', `youtube:player_client=${client};formats=duplicate,missing_pot`, ...args];
+}
+
+async function runYtdlpWithFallback(args) {
+  const cf = ensureCookies();
+  let lastErr = null;
+  for (const client of CLIENTS) {
+    try {
+      return await runYtdlpBase(withClient(args, client));
+    } catch (e) {
+      console.log(`[ytm] client "${client}" failed: ${String(e.message).slice(-120)}`);
+      lastErr = e;
+      if (e.message === 'IP_BLOCK') continue; // block → ඊළඟ client
+      throw e; // වෙන error එකක් නම් retry කරන්න තේරුමක් නෑ
+    }
+  }
+  if (cf) {
+    // cookies තිබුණත් block වුණා නම් cookies force කරලා default client එකෙන් අන්තිම පාරක්
+    try {
+      return await runYtdlpBase(['--cookies', cf, ...args]);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(
+    'YouTube එක මේ server IP එක block කරලා (හැම client එකකටම). ' +
+    'YT_COOKIES_B64 secret එක add/refresh කරන්න, නැත්නම් VPS එකකින් run කරන්න. ' +
+    'Details: ' + String(lastErr?.message || '').slice(-200)
+  );
 }
 
 // ---------- YouTube Music search (InnerTube WEB_REMIX) ----------
@@ -55,7 +92,6 @@ const CONTEXT = {
   }
 };
 
-// node-youtube-music project එකෙන් verified "songs" filter params
 const SONGS_PARAMS = 'EgWKAQIIAWoKEAoQCRADEAQQBQ%3D%3D';
 
 function joinRuns(col) {
@@ -110,10 +146,9 @@ async function searchYtMusic(query, limit = 10) {
   return results.slice(0, limit);
 }
 
-// ---------- Fallback: yt-dlp search (InnerTube empty/fail නම්) ----------
+// ---------- Fallback: yt-dlp search ----------
 async function searchViaYtdlp(query, limit = 10) {
-  const out = await runYtdlp(['--dump-json', '--no-warnings', '--flat-playlist',
-    `ytsearch${limit}:${query}`]);
+  const out = await runYtdlpWithFallback(['--dump-json', '--flat-playlist', `ytsearch${limit}:${query}`]);
   const items = out.trim().split('\n').filter(Boolean).map(l => {
     try { return JSON.parse(l); } catch { return null; }
   }).filter(Boolean);
@@ -143,13 +178,11 @@ async function downloadMp3(url, title) {
   const safe = title.replace(/[^\w\s()-]/g, '').slice(0, 60).trim() || 'song';
   const args = [
     '-f', 'bestaudio/best',
-    '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', // ~320kbps VBR
+    '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0',
     '--embed-thumbnail', '--add-metadata',
     '-o', path.join(dir, safe + '.%(ext)s'), '--no-playlist', url
   ];
-  const cf = ensureCookies();
-  if (cf) args.push('--cookies', cf);
-  await runYtdlp(args);
+  await runYtdlpWithFallback(args);
   const file = fs.readdirSync(dir).find(f => f.endsWith('.mp3'));
   return file ? path.join(dir, file) : null;
 }
