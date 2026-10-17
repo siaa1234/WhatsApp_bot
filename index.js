@@ -1,4 +1,4 @@
-// index.js — Modular v7.9 (+ Baiscope /sub, YouTube /yt, YouTube Music /song, global error handler)
+// index.js — Modular v7.9 (+ Baiscope /sub, YouTube /yt, YouTube Music /song, global error handler, retry launch)
 const { Telegraf } = require('telegraf');
 const { aliveHandler } = require('./handlers/alive');
 const { handleText, handleCallback } = require('./handlers/downloader');
@@ -98,9 +98,7 @@ bot.on('callback_query', (ctx) => {
     return handleYtCallback(ctx);
   }
 
-  // YouTube Music /song callbacks — මේක yta_ එකට කලින් check කරන්න
-  // (ytm_ prefix එක yta_/ytv_ වලට conflict නැති නිසා පිළිවෙල ගැටලුවක් නෑ, ඒත්
-  // clarity වෙනුවෙන් මෙතන තියනවා)
+  // YouTube Music /song callbacks
   if (data.startsWith('ytm_')) return handleYtmCallback(ctx);
 
   if (data.startsWith('ssq_')) return handleSsCallback(ctx);
@@ -119,8 +117,31 @@ bot.on('callback_query', (ctx) => {
   return handleCallback(ctx);
 });
 
-/* ================= Launch ================= */
-bot.launch().then(() => console.log('Bot Started ✅ Modular v7.9 (+ /song)'));
+/* ================= Launch (with retry — ETIMEDOUT fix) ================= */
+// Telegram API එකට connection timeout වුණාම crash වෙන්නේ නැතුව
+// 15s පාරක් retry කරලා max 5 පාරක් try කරනවා.
+const MAX_RETRIES = 5;
+const RETRY_DELAY = 15000;
+
+let launched = false;
+async function launchWithRetry(attempt = 1) {
+  if (launched) return;
+  try {
+    await bot.launch();
+    launched = true;
+    console.log('Bot Started ✅ Modular v7.9 (+ /song)');
+  } catch (e) {
+    console.error(`❌ Launch attempt ${attempt} failed:`, e.message);
+    if (attempt < MAX_RETRIES) {
+      console.log(`⏳ ${RETRY_DELAY / 1000}s පස්සේ retry කරනවා... (${attempt}/${MAX_RETRIES})`);
+      setTimeout(() => launchWithRetry(attempt + 1), RETRY_DELAY);
+    } else {
+      console.error('❌ Max retries ඉක්මවා ගියා. Exiting.');
+      process.exit(1);
+    }
+  }
+}
+launchWithRetry();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
