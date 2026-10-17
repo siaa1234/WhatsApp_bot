@@ -85,7 +85,12 @@ bot.on('text', (ctx) => {
 bot.on('callback_query', (ctx) => {
   const data = ctx.callbackQuery?.data || '';
 
-  if (data.startsWith('bsc_')) return handleSubCallback(ctx);
+  // FIX: bscd_ (subtitle download buttons) bsc_ check එකෙන් match වෙන්නේ නැති නිසා
+  // මුලින්ම දෙකම check කරනවා. නැත්නම් bscd_ callbacks downloader handleCallback එකට
+  // fall-through වෙලා silently drop වෙනවා.
+  if (data.startsWith('bscd_') || data.startsWith('bsc_')) {
+    return handleSubCallback(ctx);
+  }
 
   if (data.startsWith('ytsel_') || data.startsWith('ytv_') || data.startsWith('yta_')) {
     return handleYtCallback(ctx);
