@@ -1,4 +1,4 @@
-// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.1)
+// handlers/baiscope.js — බයිස්කෝප් සිංහලෙන් subtitle scraper (v2.2)
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -42,13 +42,14 @@ async function getSubtitleLink(pageUrl) {
   const { data: html } = await axios.get(pageUrl, { headers: HEADERS, timeout: 20000 });
   const $ = cheerio.load(html);
 
+  const title = ($('h1').first().text() || 'Subtitle').trim();
+  const poster = $('meta[property="og:image"]').attr('content') || null;
+
   const links = [];
   const seen = new Set();
 
-  $('a').each((i, el) => {
-    const href = ($(el).attr('href') || '').trim();
-    if (!href || seen.has(href)) return;
-
+  $('a[href]').each((i, el) => {
+    const href = $(el).attr('href') || '';
     const text = ($(el).text() || '').toLowerCase();
     const lower = href.toLowerCase();
 
@@ -60,17 +61,20 @@ async function getSubtitleLink(pageUrl) {
     const isJunk =
       lower.includes('advertise') ||
       lower.includes('facebook') || lower.includes('twitter') ||
-      lower.includes('t.me') || lower.includes('telegram') ||
-      lower.includes('youtube') ||
-      lower.includes('/category/') || lower.includes('/tag/') ||
-      href === '#' || lower.startsWith('javascript') ||
-      lower.includes('bit.ly') || lower.includes('cutt.ly') ||
-      lower.includes('shrinkme');
+      lower.includes('instagram') || lower.includes('t.me/') ||
+      lower.includes('whatsapp') || lower.includes('youtube') ||
+      lower.includes('mailto:') || lower.includes('javascript:') ||
+      lower.includes(BASE.toLowerCase() + '/category') ||
+      lower.includes(BASE.toLowerCase() + '/#') ||
+      lower.includes(BASE.toLowerCase() + '/movies') ||
+      lower.includes(BASE.toLowerCase() + '/tv');
 
-    if (isReal && !isJunk) {
+    if (isReal && !isJunk && !seen.has(href)) {
       seen.add(href);
-      const label = text || href.split('/').pop();
-      links.push({ url: href.startsWith('http') ? href : BASE + href, label });
+      links.push({
+        url: href.startsWith('http') ? href : BASE + href,
+        label: ($(el).text() || 'Download').trim().slice(0, 40)
+      });
     }
   });
 
@@ -78,29 +82,86 @@ async function getSubtitleLink(pageUrl) {
     const score = u => u.url.toLowerCase().includes('dl.baiscope') ? 0 :
       /\.(zip|rar|7z|srt)/.test(u.url.toLowerCase()) ? 1 :
       u.url.toLowerCase().includes('/download') ? 2 : 3;
-    return score(a) - score(b);
+    return score(a.url) - score(b.url);
   });
-
-  const poster = $('meta[property="og:image"]').attr('content') || '';
-  const title = ($('h1').first().text().trim()
-    || $('meta[property="og:title"]').attr('content') || 'Unknown').trim();
 
   return { title, poster, links };
 }
 
-async function downloadSubtitle(url, referer) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
-  const { data, headers } = await axios.get(url, {
-    headers: { ...HEADERS, Referer: referer },
-    responseType: 'arraybuffer',
-    timeout: 60000,
-    maxRedirects: 5
+// ---------- Download subtitle file (v2.2 — intermediate page follow + retry) ----------
+function extractRealLinks(html) {
+  const $ = cheerio.load(html);
+  const found = [];
+  const seen = new Set();
+
+  // <a href> links
+  $('a[href]').each((i, el) => {
+    const href = $(el).attr('href') || '';
+    const lower = href.toLowerCase();
+    if (lower.includes('dl.baiscope') || /\.(zip|rar|7z|srt)(\?|$)/.test(lower)) {
+      if (!seen.has(href)) { seen.add(href); found.push(href.startsWith('http') ? href : BASE + href); }
+    }
   });
 
-  const ct = headers['content-type'] || '';
-  if (ct.includes('text/html')) throw new Error('INTERMEDIATE_PAGE');
+  // form action (redirect pages වලට)
+  $('form[action]').each((i, el) => {
+    const action = $(el).attr('action') || '';
+    if (action.startsWith('http')) found.push(action);
+  });
 
-  const cd = headers['content-disposition'] || '';
+  // raw HTML regex fallback (JS redirect / obfuscated links වලට)
+  const m = html.match(/https?:\/\/[^\s"'<>]*dl\.baiscope[^\s"'<>]*/i);
+  if (m && !seen.has(m[0])) found.push(m[0]);
+
+  return found;
+}
+
+async function fetchSubtitle(url, referer, depth = 0) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
+
+  let res;
+  try {
+    res = await axios.get(url, {
+      headers: { ...HEADERS, Referer: referer },
+      responseType: 'arraybuffer',
+      timeout: 60000,
+      maxRedirects: 5,
+      // 403 එක throw වෙන්නේ නැතුව response එක අතින් බලන්න
+      validateStatus: () => true
+    });
+  } catch (e) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+
+  const status = res.status;
+  const ct = (res.headers['content-type'] || '').toLowerCase();
+  const data = res.data;
+
+  // Cloudflare / bot check page එකක් ආවොත්
+  if (status === 403 || status === 429 || status === 503) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error('CLOUDFLARE_BLOCKED (' + status + ')');
+  }
+
+  // HTML page එකක් ආවොත් — ඒකේ real link එක හොයලා follow කරන්න
+  if (ct.includes('text/html')) {
+    if (depth < 2) {
+      const html = Buffer.from(data).toString('utf8');
+      const candidates = extractRealLinks(html);
+      // දැනටමත් try කරපු url එක skip කරන්න
+      const next = candidates.find(u => u !== url);
+      if (next) {
+        console.log('[baiscope] intermediate page → following:', next);
+        fs.rmSync(dir, { recursive: true, force: true });
+        return fetchSubtitle(next, url, depth + 1);
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new Error('INTERMEDIATE_PAGE');
+  }
+
+  const cd = res.headers['content-disposition'] || '';
   const filename = (cd.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i)?.[1]
     || url.split('/').pop().split('?')[0] || 'subtitle').replace(/["']/g, '');
 
@@ -108,6 +169,10 @@ async function downloadSubtitle(url, referer) {
   const filePath = path.join(dir, `subtitle${ext}`);
   fs.writeFileSync(filePath, data);
   return filePath;
+}
+
+async function downloadSubtitle(url, referer) {
+  return fetchSubtitle(url, referer, 0);
 }
 
 const pending = new Map();
