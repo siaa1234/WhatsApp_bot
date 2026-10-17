@@ -18,7 +18,6 @@ function esc(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ---------- Search ----------
 async function searchBaiscope(query) {
   const { data: html } = await axios.get(`${BASE}/?s=${encodeURIComponent(query)}`, {
     headers: HEADERS, timeout: 20000
@@ -39,7 +38,6 @@ async function searchBaiscope(query) {
   return results.slice(0, 10);
 }
 
-// ---------- Download link extraction (strict) ----------
 async function getSubtitleLink(pageUrl) {
   const { data: html } = await axios.get(pageUrl, { headers: HEADERS, timeout: 20000 });
   const $ = cheerio.load(html);
@@ -54,13 +52,11 @@ async function getSubtitleLink(pageUrl) {
     const text = ($(el).text() || '').toLowerCase();
     const lower = href.toLowerCase();
 
-    // ✅ REAL subtitle links විතරක්:
     const isReal =
       lower.includes('dl.baiscope.lk') ||
       lower.includes('/download') ||
       /\.(zip|rar|7z|srt)(\?|$)/.test(lower);
 
-    // ❌ Ads / social / internal links exclude:
     const isJunk =
       lower.includes('advertise') ||
       lower.includes('facebook') || lower.includes('twitter') ||
@@ -78,7 +74,6 @@ async function getSubtitleLink(pageUrl) {
     }
   });
 
-  // priority sort: dl.baiscope direct links උඩින්ම
   links.sort((a, b) => {
     const score = u => u.url.toLowerCase().includes('dl.baiscope') ? 0 :
       /\.(zip|rar|7z|srt)/.test(u.url.toLowerCase()) ? 1 :
@@ -93,7 +88,6 @@ async function getSubtitleLink(pageUrl) {
   return { title, poster, links };
 }
 
-// ---------- Download subtitle file ----------
 async function downloadSubtitle(url, referer) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bsc-'));
   const { data, headers } = await axios.get(url, {
@@ -103,7 +97,6 @@ async function downloadSubtitle(url, referer) {
     maxRedirects: 5
   });
 
-  // ලැබුණේ HTML page එකක් නම් (ad/redirect page) — fail කරන්න
   const ct = headers['content-type'] || '';
   if (ct.includes('text/html')) throw new Error('INTERMEDIATE_PAGE');
 
@@ -120,7 +113,6 @@ async function downloadSubtitle(url, referer) {
 const pending = new Map();
 function createId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
-// ---------- /sub command ----------
 async function cmdSub(ctx) {
   const query = (ctx.message?.text || '').replace(/^\/sub\s*/i, '').trim();
   if (!query) {
@@ -154,14 +146,12 @@ async function cmdSub(ctx) {
   }
 }
 
-// ---------- Callbacks ----------
 async function handleSubCallback(ctx) {
   const data = ctx.callbackQuery?.data || '';
   console.log('[baiscope] callback:', data);
   await ctx.answerCbQuery().catch(e => console.log('[baiscope] answerCb fail:', e.message));
 
   try {
-    // ----- Download link select (bscd_) -----
     if (data.startsWith('bscd_')) {
       const [, id, idx] = data.split('_');
       const cached = pending.get(id);
@@ -180,9 +170,7 @@ async function handleSubCallback(ctx) {
       } catch (e) {
         await ctx.telegram.deleteMessage(ctx.chat.id, status.message_id).catch(() => {});
         console.log('[baiscope] download failed:', e.message);
-        return ctx.reply(
-          `⚠️ Direct download fail වුණා.\n\n📥 Browser එකෙන් ගන්න:\n${dl.url}`
-        );
+        return ctx.reply(`⚠️ Direct download fail වුණා.\n\n📥 Browser එකෙන් ගන්න:\n${dl.url}`);
       }
 
       try {
@@ -201,7 +189,6 @@ async function handleSubCallback(ctx) {
       return;
     }
 
-    // ----- Movie select (bsc_) -----
     if (data.startsWith('bsc_')) {
       const [, id, idx] = data.split('_');
       const results = pending.get(id);
